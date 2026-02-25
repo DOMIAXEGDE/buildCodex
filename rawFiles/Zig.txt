@@ -1,0 +1,132 @@
+// Zig.txt
+// Converted from the x86-64 assembly in assembly.txt into equivalent Zig code.
+//
+// Behavior matches the assembly:
+// - ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, newline.
+// - safe_uint64_power(64, N) detects overflow in u64.
+// - generate_permutations(N, &sink) emits 64^N tokens, each N bytes, derived from i in base-64
+//   (low 6 bits per digit, filled from right to left), and then appends '\n'.
+// - main uses N = 4 and output path "system_safe.txt".
+//
+// Build (needs libc for stdio):
+//   zig build-exe main.zig -O ReleaseFast -lc
+//
+// Run:
+//   ./main
+//
+// Output:
+//   system_safe.txt
+//
+// NOTE: Because ALPHABET includes '\n' as its last character, some generated tokens contain embedded
+// newlines in addition to the trailing '\n'. This is intentional and matches the assembly output.
+
+const std = @import("std");
+const c = @cImport({
+    @cInclude("stdio.h");
+});
+
+const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n";
+
+comptime {
+    if (ALPHABET.len != 64) @compileError("ALPHABET must be exactly 64 bytes");
+}
+
+const OutputSink = extern struct {
+    // In the assembly this is a `void*` context; for the file sink it's a FILE*.
+    ctx: ?*c.FILE = null,
+
+    // bool write(void* ctx, const char* bytes, unsigned long len)
+    write: ?*const fn (?*c.FILE, [*]const u8, usize) callconv(.C) bool = null,
+
+    // bool write_char(void* ctx, char c)
+    write_char: ?*const fn (?*c.FILE, u8) callconv(.C) bool = null,
+};
+
+fn safe_uint64_power(base: u64, exp: u64, out: *u64) bool {
+    var result: u64 = 1;
+    var i: u64 = 0;
+    while (i < exp) : (i += 1) {
+        result = std.math.mul(u64, result, base) catch return false;
+    }
+    out.* = result;
+    return true;
+}
+
+fn file_sink_write(ctx: ?*c.FILE, bytes: [*]const u8, len: usize) callconv(.C) bool {
+    if (ctx == null) return false;
+    // fwrite(ptr, size=1, nmemb=len, stream)
+    const wrote = c.fwrite(bytes, 1, len, ctx.?);
+    return wrote == len;
+}
+
+fn file_sink_write_char(ctx: ?*c.FILE, ch: u8) callconv(.C) bool {
+    if (ctx == null) return false;
+    const rc = c.fputc(@as(c_int, ch), ctx.?);
+    return rc != -1;
+}
+
+fn file_sink_init(sink: *OutputSink, path: [*:0]const u8) bool {
+    const fp = c.fopen(path, "w");
+    if (fp == null) return false;
+
+    sink.ctx = fp;
+    sink.write = file_sink_write;
+    sink.write_char = file_sink_write_char;
+    return true;
+}
+
+fn file_sink_close(sink: *OutputSink) void {
+    if (sink.ctx) |fp| {
+        _ = c.fclose(fp);
+        sink.ctx = null;
+    }
+}
+
+fn generate_permutations(n: u64, sink: *OutputSink) bool {
+    var limit: u64 = 0;
+    if (!safe_uint64_power(64, n, &limit)) return false;
+
+    // The assembly uses a fixed stack buffer at [rbp-50]. We mirror that with a max of 50 bytes.
+    var buf: [50]u8 = undefined;
+    const n_usize: usize = @intCast(n);
+    if (n_usize > buf.len) return false;
+
+    const token = buf[0..n_usize];
+
+    const write_fn = sink.write orelse return false;
+    const write_char_fn = sink.write_char orelse return false;
+
+    var i: u64 = 0;
+    while (i < limit) : (i += 1) {
+        var v: u64 = i;
+
+        // Fill from right to left
+        var pos: usize = n_usize;
+        while (pos > 0) {
+            pos -= 1;
+            const idx: usize = @intCast(v & 63);
+            token[pos] = ALPHABET[idx];
+            v >>= 6;
+        }
+
+        if (!write_fn(sink.ctx, token.ptr, token.len)) return false;
+        if (!write_char_fn(sink.ctx, '\n')) return false;
+    }
+
+    return true;
+}
+
+pub fn main() void {
+    var sink: OutputSink = .{};
+    const out_path: [*:0]const u8 = "system_safe.txt";
+
+    if (!file_sink_init(&sink, out_path)) {
+        c.perror("Error opening file");
+        std.process.exit(1);
+    }
+
+    const ok = generate_permutations(4, &sink);
+    file_sink_close(&sink);
+
+    std.process.exit(if (ok) 0 else 1);
+}

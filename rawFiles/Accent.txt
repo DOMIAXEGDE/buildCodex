@@ -1,0 +1,199 @@
+// ============================================================================
+// Accent Script (Monolithic)
+// Program: system_safe permutation generator (64-ary, fixed length n=4)
+// Source: assembly.txt translation (x86-64, Intel syntax)  :contentReference[oaicite:1]{index=1}
+// ============================================================================
+//
+// Accent language conventions used here (self-contained / no imports):
+// - Primitive types: u8, u64, i64, bool, ptr
+// - Arrays: [T; N] for fixed-size; here we use stack arrays sized by n at runtime
+// - "ref" parameters are mutable references
+// - "extern" declares host-provided libc-like functions
+// - Checked arithmetic helper: mul_u64_checked(a,b) -> (u64 product, bool overflow)
+//
+// NOTE: This emits 64^4 = 16,777,216 lines to system_safe.txt (very large).
+// ============================================================================
+
+
+// -------------------------------
+// Host / libc-like externs
+// -------------------------------
+extern fn fopen(path: ptr<u8>, mode: ptr<u8>) -> ptr
+extern fn fclose(f: ptr) -> i64
+extern fn fwrite(buf: ptr<u8>, size: u64, count: u64, f: ptr) -> u64
+extern fn fputc(ch: i64, f: ptr) -> i64
+extern fn perror(msg: ptr<u8>) -> void
+
+// Minimal helper to get C-string pointers from string literals
+extern fn cstr(lit: string) -> ptr<u8>
+
+// Checked multiply for u64 (returns overflow flag)
+// (In a real Accent runtime this would map to MUL + OF/CF check.)
+extern fn mul_u64_checked(a: u64, b: u64) -> (u64, bool)
+
+
+// -------------------------------
+// Constants (matches assembly)
+// -------------------------------
+const ALPHABET: string =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567" +
+  "89 \n"   // includes: '8','9',' ','\n'  => total 64 chars
+
+const MODE_W: string = "w"
+const OUT_PATH: string = "system_safe.txt"
+const ERR_OPEN: string = "Error opening file"
+
+
+// -------------------------------
+// OutputSink interface (matches the assembly's struct usage)
+// sink.ctx is the "void*" in the assembly
+// sink.write(ctx, buf, len) returns bool success
+// sink.write_char(ctx, ch) returns bool success
+// -------------------------------
+struct OutputSink {
+  ctx: ptr
+  write: fn(ptr, ptr<u8>, u64) -> bool
+  write_char: fn(ptr, u8) -> bool
+}
+
+
+// -------------------------------
+// FileSink implementation
+// -------------------------------
+
+// file_sink_write(void*, char const*, unsigned long) -> bool
+fn file_sink_write(ctx: ptr, buf: ptr<u8>, len: u64) -> bool {
+  // fwrite(buf, 1, len, (FILE*)ctx) must write exactly len
+  let written: u64 = fwrite(buf, 1, len, ctx)
+  return written == len
+}
+
+// file_sink_write_char(void*, char) -> bool
+fn file_sink_write_char(ctx: ptr, ch: u8) -> bool {
+  // fputc returns -1 on error
+  let rc: i64 = fputc(i64(ch), ctx)
+  return rc != -1
+}
+
+// file_sink_init(OutputSink*, char const*) -> bool
+fn file_sink_init(sink: ref OutputSink, path: string) -> bool {
+  let f: ptr = fopen(cstr(path), cstr(MODE_W))
+  if f == 0 {
+    return false
+  }
+  sink.ctx = f
+  sink.write = file_sink_write
+  sink.write_char = file_sink_write_char
+  return true
+}
+
+// file_sink_close(OutputSink*) -> void
+fn file_sink_close(sink: ref OutputSink) -> void {
+  if &sink == 0 { return }          // defensive
+  if sink.ctx == 0 { return }
+  _ = fclose(sink.ctx)
+  sink.ctx = 0
+}
+
+
+// -------------------------------
+// safe_uint64_power(base, exp, out*) -> bool
+// Mirrors the assembly logic:
+//   *out = 1; i = 0; while i < exp { if overflow(out*base) return false; out*=base; i++ }
+// -------------------------------
+fn safe_u64_power(base: u64, exp: u64, out: ref u64) -> bool {
+  out = 1
+  let i: u64 = 0
+  while i < exp {
+    let (p, overflow) = mul_u64_checked(out, base)
+    if overflow { return false }
+    out = p
+    i = i + 1
+  }
+  return true
+}
+
+
+// -------------------------------
+// generate_permutations(n, sink*) -> bool
+// Matches the assembly algorithm:
+// - limit = 64^n (checked)
+// - for idx in [0..limit-1]:
+//     x = idx
+//     for pos from n-1 downto 0:
+//        digit = x & 63
+//        buf[pos] = ALPHABET[digit]
+//        x >>= 6
+//     sink.write(buf, n)
+//     sink.write_char('\n')
+// -------------------------------
+fn generate_permutations(n: u64, sink: ref OutputSink) -> bool {
+  let limit: u64 = 0
+  if !safe_u64_power(64, n, limit) {
+    return false
+  }
+
+  // runtime-sized stack buffer
+  // Accent supports stack arrays sized by values (monolithic convenience)
+  let buf: [u8; n]
+
+  let idx: u64 = 0
+  while idx < limit {
+    let x: u64 = idx
+
+    // Fill from right to left (pos = n-1 .. 0)
+    // Assembly uses a signed loop with jns; same effect here.
+    let pos_i: i64 = i64(n) - 1
+    while pos_i >= 0 {
+      let digit: u64 = x & 63
+      buf[u64(pos_i)] = u8(ALPHABET[u64(digit)])
+      x = x >> 6
+      pos_i = pos_i - 1
+    }
+
+    // Write the n-byte string
+    if !sink.write(sink.ctx, &buf[0], n) {
+      return false
+    }
+
+    // Write newline char 10
+    if !sink.write_char(sink.ctx, 10) {
+      return false
+    }
+
+    idx = idx + 1
+  }
+
+  return true
+}
+
+
+// -------------------------------
+// main (matches assembly):
+// - n = 4
+// - open "system_safe.txt" for write
+// - on failure: perror("Error opening file"); return 1
+// - generate_permutations(4, sink)
+// - close
+// - return 0 on success else 1
+// -------------------------------
+fn main() -> i64 {
+  let n: u64 = 4
+
+  let sink: OutputSink
+  sink.ctx = 0
+  sink.write = null
+  sink.write_char = null
+
+  if !file_sink_init(sink, OUT_PATH) {
+    perror(cstr(ERR_OPEN))
+    return 1
+  }
+
+  let ok: bool = generate_permutations(n, sink)
+
+  file_sink_close(sink)
+
+  if !ok { return 1 }
+  return 0
+}

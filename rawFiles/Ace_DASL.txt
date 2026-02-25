@@ -1,0 +1,148 @@
+// SystemSafe_ace.dasl
+// Monolithic "Ace DASL" script (BOS + AUS) corresponding to the assembly.txt program.
+//
+// Behavior: generate all BASE^len strings over ALPHABET by enumerating i=0..BASE^len-1,
+// encoding i in base-64 using 6-bit digits (lowest digit on the right), and writing each
+// len-byte record followed by '\n' to "system_safe.txt".
+
+/* =========================
+   DASL/BOS (Business Objects)
+   ========================= */
+
+bos SystemSafeBOS {
+
+  // NOTE: This alphabet is exactly 64 bytes long.
+  // Indices 0..63 map to:
+  //   0..25  -> a..z
+  //   26..51 -> A..Z
+  //   52..61 -> 0..9
+  //   62     -> space
+  //   63     -> newline (ASCII 10)
+  const String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n";
+  const UInt64 BASE = 64u;
+  const UInt64 UINT64_MAX = 18446744073709551615u;
+
+  // Output sink used by the permutation generator.
+  interface OutputSink {
+    // Write exactly `count` bytes from `data` (ASCII/byte-accurate).
+    boolean writeBytes(ByteArray data, UInt64 count);
+
+    // Write a single byte/char.
+    boolean writeChar(Byte c);
+
+    // Close and release resources.
+    void close();
+  }
+
+  // File-backed sink (mirrors the assembly's fwrite/fputc behavior).
+  class FileSink implements OutputSink {
+    private FileHandle fh;
+
+    static FileSink open(String path) {
+      FileHandle h = File.open(path, "w");    // text-mode write, like fopen(path,"w")
+      if (h == null) return null;
+
+      FileSink s = new FileSink();
+      s.fh = h;
+      return s;
+    }
+
+    boolean writeBytes(ByteArray data, UInt64 count) {
+      // Return true iff we wrote exactly `count` bytes.
+      UInt64 written = File.write(this.fh, data, 0u, count); // like fwrite(data,1,count,fh)
+      return (written == count);
+    }
+
+    boolean writeChar(Byte c) {
+      // Return true iff fputc succeeds.
+      return File.putc(this.fh, c);
+    }
+
+    void close() {
+      if (this.fh != null) {
+        File.close(this.fh);
+        this.fh = null;
+      }
+    }
+  }
+
+  // Equivalent of safe_uint64_power(base, exp, &out).
+  // Returns false on overflow, true otherwise.
+  static boolean safe_uint64_power(UInt64 base, UInt64 exp, out UInt64 outValue) {
+    outValue = 1u;
+
+    UInt64 i = 0u;
+    while (i < exp) {
+      // overflow check for outValue * base in UInt64
+      if (base != 0u && outValue > (UINT64_MAX / base)) {
+        return false;
+      }
+      outValue = outValue * base;
+      i = i + 1u;
+    }
+    return true;
+  }
+
+  // Equivalent of generate_permutations(len, sink).
+  static boolean generate_permutations(UInt64 len, OutputSink sink) {
+    UInt64 limit;
+    if (!safe_uint64_power(BASE, len, limit)) {
+      return false;
+    }
+
+    // Empty-len case matches the assembly: write "" then '\n' once.
+    // (limit == 1, loop runs once, buffer length 0, then newline)
+    UInt64 i = 0u;
+    while (i < limit) {
+      UInt64 tmp = i;
+
+      ByteArray buf = ByteArray.new(len);  // fixed-length byte buffer (ASCII bytes)
+
+      // fill from right to left
+      Int64 pos = (Int64)len - 1;
+      while (pos >= 0) {
+        UInt64 idx = (tmp & 63u);   // 6-bit digit
+        Byte ch = (Byte)ALPHABET.charCodeAt((Int64)idx); // ASCII byte from ALPHABET[idx]
+        buf[(UInt64)pos] = ch;
+
+        tmp = (tmp >> 6);
+        pos = pos - 1;
+      }
+
+      if (!sink.writeBytes(buf, len)) return false;
+      if (!sink.writeChar((Byte)10))  return false; // newline after each record
+
+      i = i + 1u;
+    }
+    return true;
+  }
+}
+
+/* =========================
+   DASL/AUS (Application Usage)
+   ========================= */
+
+aus SystemSafeAUS {
+
+  // Minimal non-interactive "main task" wrapper.
+  // Mirrors the assembly's main() behavior (len=4, out="system_safe.txt").
+  task Main {
+    action run() {
+
+      UInt64 len = 4u;
+      String outPath = "system_safe.txt";
+
+      SystemSafeBOS.FileSink sink = SystemSafeBOS.FileSink.open(outPath);
+      if (sink == null) {
+        Console.perror("Error opening file");
+        OS.exit(1);
+      }
+
+      boolean ok = SystemSafeBOS.generate_permutations(len, sink);
+      sink.close();
+
+      if (!ok) OS.exit(1);
+      OS.exit(0);
+    }
+  }
+}

@@ -1,0 +1,122 @@
+// Swift.txt
+// Converted from assembly.txt (x86-64) into equivalent Swift source.
+//
+// What it does:
+// - Defines a 64-character alphabet: a-z, A-Z, 0-9, space, newline.
+// - Computes limit = 64^N safely in UInt64 (overflow-checked).
+// - For each i in [0, limit), emits an N-byte token by treating i as base-64 digits
+//   (using the low 6 bits per digit, from right to left).
+// - Writes each token followed by '\n' to "system_safe.txt".
+// - In the original assembly, N is fixed to 4.
+//
+// Build (macOS):
+//   swiftc -O main.swift -o system_safe
+//
+// Run:
+//   ./system_safe
+//
+// Output:
+//   system_safe.txt
+
+import Foundation
+import Darwin
+
+private let alphabet: [UInt8] = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n".utf8)
+// Expected length: 64
+private let alphabetMask: UInt64 = 63
+
+private func safeUInt64Power(base: UInt64, exp: UInt64) -> (ok: Bool, value: UInt64) {
+    var result: UInt64 = 1
+    if exp == 0 { return (true, 1) }
+
+    for _ in 0..<exp {
+        let (p, overflow) = result.multipliedReportingOverflow(by: base)
+        if overflow { return (false, 0) }
+        result = p
+    }
+    return (true, result)
+}
+
+private protocol OutputSink: AnyObject {
+    func write(bytes: UnsafeRawPointer, count: Int) -> Bool
+    func writeByte(_ b: UInt8) -> Bool
+    func close()
+}
+
+private final class FileSink: OutputSink {
+    private var fp: UnsafeMutablePointer<FILE>?
+
+    init?(path: String) {
+        self.fp = fopen(path, "w")
+        if self.fp == nil { return nil }
+    }
+
+    func write(bytes: UnsafeRawPointer, count: Int) -> Bool {
+        guard let fp else { return false }
+        let wrote = fwrite(bytes, 1, count, fp)
+        return wrote == count
+    }
+
+    func writeByte(_ b: UInt8) -> Bool {
+        guard let fp else { return false }
+        return fputc(Int32(b), fp) != EOF
+    }
+
+    func close() {
+        if let fp {
+            fclose(fp)
+            self.fp = nil
+        }
+    }
+
+    deinit {
+        close()
+    }
+}
+
+private func generatePermutations(n: UInt64, sink: OutputSink) -> Bool {
+    guard alphabet.count == 64 else { return false }
+
+    let pow = safeUInt64Power(base: 64, exp: n)
+    guard pow.ok else { return false }
+    let limit = pow.value
+
+    // Buffer holds exactly N bytes (no terminator).
+    var buffer = [UInt8](repeating: 0, count: Int(n))
+
+    for i in 0..<limit {
+        var v = i
+        for pos in stride(from: Int(n) - 1, through: 0, by: -1) {
+            let idx = Int(v & alphabetMask)
+            buffer[pos] = alphabet[idx]
+            v >>= 6
+        }
+
+        let okWriteToken = buffer.withUnsafeBytes { rawBuf -> Bool in
+            guard let baseAddr = rawBuf.baseAddress else { return false }
+            return sink.write(bytes: baseAddr, count: buffer.count)
+        }
+        if !okWriteToken { return false }
+        if !sink.writeByte(10) { return false } // '\n'
+    }
+
+    return true
+}
+
+@main
+struct Program {
+    static func main() {
+        let n: UInt64 = 4
+        let outPath = "system_safe.txt"
+
+        guard let sink = FileSink(path: outPath) else {
+            perror("Error opening file")
+            exit(1)
+        }
+
+        let ok = generatePermutations(n: n, sink: sink)
+        sink.close()
+
+        exit(ok ? 0 : 1)
+    }
+}

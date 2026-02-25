@@ -1,0 +1,183 @@
+; =================================:contentReference[oaicite:4]{index=4}======
+; A-0 SYSTEM SCRIPT (monolithic): SYSTEM_SAFE_GENERATOR.A0
+; ============================================================
+; Program intent (from attached assembly):
+;   - Open "system_safe.txt" for writing
+;   - Enumerate all base-64 strings of length N=4 using a 64-char alphabet
+;   - Write each string + newline
+;   - Close file, return status
+;
+; Alphabet (64 chars):
+;   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+; ============================================================
+
+; -------------------------
+; DATA DECK (literals)
+; -------------------------
+D0001: ASCII "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"   ; 64 chars
+D0002: ASCII "system_safe.txt"
+D0003: ASCII "w"
+D0004: ASCII "Error opening file"
+D0005: U64   4                                                         ; N = 4
+D0006: U64   64                                                        ; BASE = 64
+D0007: U64   63                                                        ; MASK = 0x3F
+D0008: U8    10                                                        ; '\n'
+
+; -------------------------
+; RESERVED STORAGE (variables)
+; -------------------------
+V0001: PTR   0              ; FILE_HANDLE
+V0002: U64   0              ; LIMIT = 64^N
+V0003: U64   0              ; I (outer counter)
+V0004: U64   0              ; X (scratch copy of I)
+V0005: S64   0              ; J (signed index, counts down)
+V0006: U64   0              ; DIGIT (0..63)
+V0007: U8    0              ; CH
+V0010: BYTES 64             ; BUF (we only use first N bytes)
+
+; -------------------------
+; SUBROUTINE DIRECTORY (numeric “call numbers”)
+; -------------------------
+;   ID    NAME                         ARGS...                         -> RET
+; ---------------------------------------------------------------
+;   010   U64_SAFE_POW                 (base, exp, out_u64_ptr)         -> ok(0/1)
+;   020   GEN_PERMUTATIONS             (n, alphabet_ptr, file_handle)   -> ok(0/1)
+;   500   FOPEN                        (filename_ptr, mode_ptr)         -> file_handle(0 if fail)
+;   501   FCLOSE                       (file_handle)                    -> ok(0/1)
+;   502   FWRITE_ALL                   (file_handle, buf_ptr, len_u64)  -> ok(0/1)
+;   503   FPUTC_SAFE                   (file_handle, u8_char)           -> ok(0/1)
+;   510   UMUL_OVF                     (a_u64, b_u64)                   -> (prod_u64, ovf_u8)
+;   520   PERROR                       (msg_ptr)                        -> ()
+;   999   EXIT                         (code_u64)                       -> ()
+;
+; (500..503,520,999 are “environment/library” routines in A-0 spirit.)
+
+; ============================================================
+; SUBROUTINE 010: U64_SAFE_POW(base, exp, out_ptr) -> ok
+; Mirrors: safe_uint64_power() in the assembly
+; ============================================================
+SUB 010 U64_SAFE_POW
+    ; out = 1
+    STORE_U64 [ARG3], 1
+    STORE_U64 V0003, 0                ; reuse V0003 as local COUNTER
+
+L010_00:
+    ; if COUNTER >= EXP: return 1
+    IF_U64_GE  V0003, ARG2  GOTO L010_OK
+
+    ; (prod, ovf) = UMUL_OVF(*out, base)
+    LOAD_U64   V0004, [ARG3]
+    CALL 510   V0004, ARG1      -> V0002, V0007   ; prod -> V0002, ovf -> V0007
+
+    ; if ovf != 0: return 0
+    IF_U8_NE   V0007, 0         GOTO L010_FAIL
+
+    ; *out = prod
+    STORE_U64  [ARG3], V0002
+
+    ; COUNTER++
+    ADD_U64    V0003, V0003, 1
+    GOTO L010_00
+
+L010_FAIL:
+    RETURN_U8  0
+
+L010_OK:
+    RETURN_U8  1
+ENDSUB
+
+
+; ============================================================
+; SUBROUTINE 020: GEN_PERMUTATIONS(n, alphabet_ptr, file_handle) -> ok
+; Mirrors: generate_permutations() in the assembly
+; ============================================================
+SUB 020 GEN_PERMUTATIONS
+    ; compute LIMIT = 64^n safely
+    CALL 010  D0006, ARG1, &V0002   -> V0007      ; ok in V0007
+    IF_U8_EQ  V0007, 0              GOTO L020_FAIL
+
+    ; i = 0
+    STORE_U64 V0003, 0
+
+L020_I_LOOP:
+    ; if i >= LIMIT: return 1
+    IF_U64_GE V0003, V0002          GOTO L020_OK
+
+    ; x = i
+    STORE_U64 V0004, V0003
+
+    ; j = n - 1  (signed)
+    SUB_S64   V0005, ARG1, 1
+
+L020_J_LOOP:
+    ; if j < 0: finished digits
+    IF_S64_LT V0005, 0              GOTO L020_WRITE
+
+    ; digit = x & 63
+    AND_U64   V0006, V0004, D0007
+
+    ; ch = alphabet[digit]
+    LOAD_U8_INDEX  V0007, ARG2, V0006    ; V0007 = *(alphabet + digit)
+
+    ; BUF[j] = ch
+    STORE_U8_INDEX V0010, V0005, V0007   ; *(BUF + j) = ch
+
+    ; x >>= 6
+    SHR_U64   V0004, V0004, 6
+
+    ; j--
+    SUB_S64   V0005, V0005, 1
+    GOTO L020_J_LOOP
+
+L020_WRITE:
+    ; write BUF[0..n-1]
+    CALL 502  ARG3, &V0010, ARG1    -> V0007
+    IF_U8_EQ  V0007, 0              GOTO L020_FAIL
+
+    ; write '\n'
+    CALL 503  ARG3, D0008           -> V0007
+    IF_U8_EQ  V0007, 0              GOTO L020_FAIL
+
+    ; i++
+    ADD_U64   V0003, V0003, 1
+    GOTO L020_I_LOOP
+
+L020_FAIL:
+    RETURN_U8 0
+
+L020_OK:
+    RETURN_U8 1
+ENDSUB
+
+
+; ============================================================
+; MAIN PROGRAM DECK (A-0 “sequence of subroutines + arguments”)
+; Mirrors: main() in the assembly
+; ============================================================
+MAIN:
+    ; file = fopen("system_safe.txt", "w")
+    CALL 500  D0002, D0003              -> V0001
+
+    ; if file == 0: perror("Error opening file"); exit(1)
+    IF_PTR_EQ V0001, 0                  GOTO M_OPEN_FAIL
+
+    ; ok = GEN_PERMUTATIONS(N, ALPHABET, file)
+    CALL 020  D0005, D0001, V0001       -> V0007
+
+    ; close file (best-effort)
+    CALL 501  V0001                     -> V0006
+
+    ; if ok == 0: exit(1) else exit(0)
+    IF_U8_EQ  V0007, 0                  GOTO M_EXIT_FAIL
+    CALL 999  0
+    HALT
+
+M_OPEN_FAIL:
+    CALL 520  D0004
+    CALL 999  1
+    HALT
+
+M_EXIT_FAIL:
+    CALL 999  1
+    HALT
+ENDMAIN

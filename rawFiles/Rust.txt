@@ -1,0 +1,113 @@
+// Rust.txt
+// Converted from assembly.txt (x86-64) into equivalent Rust source.
+//
+// Behavior (matches the assembly):
+// - Alphabet is 64 bytes: a-z, A-Z, 0-9, space, newline.
+// - Computes limit = 64^N with overflow detection (UInt64).
+// - For each i in [0, limit), forms an N-byte token using base-64 digits:
+//     token[pos] = ALPHABET[i & 63]; i >>= 6; filling from right to left.
+// - Writes token bytes (exactly N bytes) then writes '\n'.
+// - main uses N = 4 and output path "system_safe.txt".
+//
+// Build:
+//   rustc -O main.rs
+//
+// Run:
+//   ./main
+//
+// Output:
+//   system_safe.txt
+//
+// Note: Because the alphabet itself includes '\n' as the 64th character AND we also append '\n',
+// some tokens contain embedded newlines, so the output file will not be strictly "one token per line"
+// when those embedded newlines occur (this is intentional and matches the assembly).
+
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+
+const ALPHABET: &[u8; 64] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n";
+
+fn safe_u64_power(base: u64, exp: u64) -> Option<u64> {
+    let mut out: u64 = 1;
+    for _ in 0..exp {
+        out = out.checked_mul(base)?;
+    }
+    Some(out)
+}
+
+trait OutputSink {
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn write_char(&mut self, c: u8) -> io::Result<()>;
+}
+
+impl<W: Write> OutputSink for W {
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write_all(bytes)
+    }
+    fn write_char(&mut self, c: u8) -> io::Result<()> {
+        self.write_all(&[c])
+    }
+}
+
+fn generate_permutations(n: u64, sink: &mut dyn OutputSink) -> io::Result<bool> {
+    let limit = match safe_u64_power(64, n) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+
+    // The assembly uses a fixed stack buffer and writes exactly N bytes each iteration.
+    // Here we allocate a Vec of length N.
+    let n_usize: usize = match n.try_into() {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let mut buf = vec![0u8; n_usize];
+
+    for i in 0..limit {
+        let mut v = i;
+        for pos in (0..n_usize).rev() {
+            let idx = (v & 63) as usize;
+            buf[pos] = ALPHABET[idx];
+            v >>= 6;
+        }
+
+        // Write token bytes, then '\n' (10).
+        if let Err(_) = sink.write_bytes(&buf) {
+            return Ok(false);
+        }
+        if let Err(_) = sink.write_char(b'\n') {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn main() {
+    let n: u64 = 4;
+    let out_path = "system_safe.txt";
+
+    let file = match File::create(out_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Error opening file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut writer = BufWriter::new(file);
+
+    let ok = match generate_permutations(n, &mut writer) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Write error: {}", e);
+            false
+        }
+    };
+
+    // Ensure all buffered data is flushed.
+    let _ = writer.flush();
+
+    std::process::exit(if ok { 0 } else { 1 });
+}

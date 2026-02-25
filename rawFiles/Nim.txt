@@ -1,0 +1,92 @@
+# Nim.txt
+# Converted from the x86-64 assembly in assembly.txt into equivalent Nim code.
+#
+# Behavior matches the assembly:
+#   * ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, LF.
+#   * safe_uint64_power(64, N) detects overflow in uint64.
+#   * generate_permutations(N, file) enumerates i = 0 .. 64^N-1 and forms an N-byte token
+#     by taking base-64 digits (low 6 bits) from right to left, then writes the token and
+#     appends '\n' (LF = 10).
+#   * main uses N = 4 and output file "system_safe.txt".
+#
+# Build:
+#   nim c -d:release main.nim
+#
+# Run:
+#   ./main
+#
+# Output:
+#   system_safe.txt
+#
+# NOTE: Because ALPHABET itself contains LF as its 64th character AND we also append LF after
+# each token, some tokens contain embedded newlines. This is intentional and matches the
+# assembly output.
+
+import std/os
+
+const
+  Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n" # 64 chars
+  MaxN = 50
+
+static:
+  doAssert Alphabet.len == 64, "Alphabet must be exactly 64 characters"
+
+proc safeUint64Power(base, exp: uint64; outVal: var uint64): bool =
+  ## Returns false if overflow would occur.
+  var result: uint64 = 1
+  var i: uint64 = 0
+  while i < exp:
+    if base != 0'u64 and result > high(uint64) div base:
+      return false
+    result = result * base
+    inc i
+  outVal = result
+  true
+
+proc generatePermutations(n: uint64; f: var File): bool =
+  var limit: uint64
+  if not safeUint64Power(64'u64, n, limit):
+    return false
+
+  let nInt = int(n)
+  if nInt < 0 or nInt > MaxN:
+    return false
+
+  var buf: array[MaxN, char]
+
+  var i: uint64 = 0
+  while i < limit:
+    var v = i
+
+    # Fill from right to left
+    var pos = nInt - 1
+    while pos >= 0:
+      let idx = int(v and 63'u64) # 0..63
+      buf[pos] = Alphabet[idx]
+      v = v shr 6
+      dec pos
+
+    # Write exactly N bytes, then '\n'
+    let wrote = f.writeBuffer(unsafeAddr buf[0], nInt)
+    if wrote != nInt:
+      return false
+    f.write('\n')
+
+    inc i
+
+  true
+
+when isMainModule:
+  const N: uint64 = 4
+  const OutPath = "system_safe.txt"
+
+  var f: File
+  if not open(f, OutPath, fmWrite):
+    # Similar to perror("Error opening file") in assembly.
+    stderr.writeLine("Error opening file: " & osLastErrorMsg())
+    quit(1)
+
+  let ok = generatePermutations(N, f)
+  close(f)
+
+  quit(if ok: 0 else: 1)

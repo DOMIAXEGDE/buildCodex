@@ -1,0 +1,186 @@
+-- Ada.txt
+-- Converted from the x86-64 assembly in assembly.txt into equivalent Ada (GNAT) code.
+--
+-- Behavior matches the assembly:
+--   * ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, LF.
+--   * safe_uint64_power(64, N) detects overflow in 64-bit unsigned arithmetic.
+--   * generate_permutations(N, sink) enumerates i = 0 .. 64^N-1 and forms an N-byte token
+--     by taking base-64 digits (low 6 bits) from right to left, then writes the token and
+--     appends '\n' (LF = 10).
+--   * main uses N = 4 and output file "system_safe.txt".
+--
+-- Build (GNAT):
+--   gnatmake -O2 main.adb
+--
+-- Run:
+--   ./main
+--
+-- Output:
+--   system_safe.txt
+--
+-- NOTE: Because ALPHABET itself contains LF as its 64th character AND we also append LF after
+-- each token, some tokens contain embedded newlines. This is intentional and matches the
+-- assembly output.
+
+with Ada.Streams;
+with Ada.Streams.Stream_IO;
+with Ada.Text_IO;
+with Ada.Characters.Latin_1;
+with Interfaces;
+
+procedure Main is
+   use Ada.Streams;
+   use Ada.Streams.Stream_IO;
+   use Interfaces;
+
+   -- 64-byte alphabet, exactly as in the assembly.
+   Alphabet : constant String :=
+     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+       & Ada.Characters.Latin_1.LF;
+
+   Max_N : constant Natural := 50;
+
+   -- "OutputSink" equivalent (assembly stores: ctx pointer + function pointers).
+   -- Here we implement only a file-backed sink like the assembly.
+   type File_Sink is record
+      F    : Ada.Streams.Stream_IO.File_Type;
+      Open : Boolean := False;
+   end record;
+
+   function File_Sink_Init (S : in out File_Sink; Path : String) return Boolean is
+   begin
+      Create (File => S.F, Mode => Out_File, Name => Path);
+      S.Open := True;
+      return True;
+   exception
+      when others =>
+         S.Open := False;
+         return False;
+   end File_Sink_Init;
+
+   function File_Sink_Write (S : in out File_Sink;
+                             Data : Stream_Element_Array) return Boolean is
+   begin
+      if not S.Open then
+         return False;
+      end if;
+      Write (File => S.F, Item => Data);
+      return True;
+   exception
+      when others =>
+         return False;
+   end File_Sink_Write;
+
+   function File_Sink_Write_Char (S : in out File_Sink;
+                                  C : Stream_Element) return Boolean is
+      One : Stream_Element_Array (1 .. 1);
+   begin
+      One (1) := C;
+      return File_Sink_Write (S, One);
+   end File_Sink_Write_Char;
+
+   procedure File_Sink_Close (S : in out File_Sink) is
+   begin
+      if S.Open then
+         Close (S.F);
+         S.Open := False;
+      end if;
+   exception
+      when others =>
+         S.Open := False;
+   end File_Sink_Close;
+
+   -- Overflow-checked power in Unsigned_64 (matches safe_uint64_power in assembly).
+   function Safe_U64_Power (Base, Exp : Unsigned_64;
+                            Out_Value : out Unsigned_64) return Boolean is
+      Result : Unsigned_64 := 1;
+      I      : Unsigned_64 := 0;
+   begin
+      while I < Exp loop
+         -- Detect overflow: Result * Base must fit in Unsigned_64.
+         if Base /= 0 and then Result > Unsigned_64'Last / Base then
+            return False;
+         end if;
+
+         Result := Result * Base;
+         I := I + 1;
+      end loop;
+
+      Out_Value := Result;
+      return True;
+   end Safe_U64_Power;
+
+   function Generate_Permutations (N : Unsigned_64; S : in out File_Sink) return Boolean is
+      Limit : Unsigned_64 := 0;
+      Buf   : Stream_Element_Array (1 .. Max_N);
+      N_Int : Natural;
+      I     : Unsigned_64;
+      V     : Unsigned_64;
+      Idx   : Unsigned_64;
+
+      LF_Byte : constant Stream_Element :=
+        Stream_Element (Character'Pos (Ada.Characters.Latin_1.LF));
+   begin
+      if not S.Open then
+         return False;
+      end if;
+
+      if N > Unsigned_64 (Max_N) then
+         return False;
+      end if;
+
+      -- Compute Limit = 64^N with overflow detection.
+      if not Safe_U64_Power (Base => 64, Exp => N, Out_Value => Limit) then
+         return False;
+      end if;
+
+      N_Int := Natural (N); -- safe because N <= Max_N.
+
+      -- For i in 0 .. Limit-1
+      I := 0;
+      while I < Limit loop
+         V := I;
+
+         -- Fill buffer from right to left.
+         if N_Int > 0 then
+            for Pos in reverse 1 .. N_Int loop
+               Idx := V and 63;
+               -- Alphabet is 1-based string; Idx is 0..63.
+               Buf (Pos) :=
+                 Stream_Element (Character'Pos (Alphabet (Natural (Idx) + 1)));
+               V := Shift_Right (V, 6);
+            end loop;
+
+            if not File_Sink_Write (S, Buf (1 .. N_Int)) then
+               return False;
+            end if;
+         end if;
+
+         if not File_Sink_Write_Char (S, LF_Byte) then
+            return False;
+         end if;
+
+         I := I + 1;
+      end loop;
+
+      return True;
+   end Generate_Permutations;
+
+   Sink : File_Sink;
+   Ok   : Boolean;
+begin
+   -- main(): fixed N=4, file "system_safe.txt"
+   if not File_Sink_Init (Sink, "system_safe.txt") then
+      Ada.Text_IO.Put_Line ("Error opening file");
+      return;
+   end if;
+
+   Ok := Generate_Permutations (N => 4, S => Sink);
+   File_Sink_Close (Sink);
+
+   if not Ok then
+      -- Assembly returns exit code 1 on failure.
+      -- GNAT: raise an exception to signal failure (or call OS_Exit).
+      raise Program_Error with "Generation failed";
+   end if;
+end Main;

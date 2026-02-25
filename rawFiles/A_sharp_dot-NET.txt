@@ -1,0 +1,214 @@
+--  system_safe.adb
+--  Monolithic A# (.NET) / Ada program equivalent to the provided assembly.
+--  Writes all base-64 “digits” (using the given 64-char alphabet) for length N
+--  into "system_safe.txt", one permutation per line.
+
+with Ada.Characters.Latin_1;
+with Ada.Command_Line;
+with Ada.Text_IO;
+with Ada.Streams;
+with Ada.Streams.Stream_IO;
+with Interfaces;
+
+procedure System_Safe is
+   use Interfaces;
+   use Ada.Characters.Latin_1;
+
+   -- ALPHABET:
+   -- "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+   Alphabet : constant String :=
+     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " & LF;
+
+   Default_Out_Path : constant String := "system_safe.txt";
+   Err_Open_Msg     : constant String := "Error opening file";
+
+   type Output_Sink is record
+      File    : Ada.Streams.Stream_IO.File_Type;
+      Is_Open : Boolean := False;
+   end record;
+
+   function File_Sink_Init (Sink : in out Output_Sink; Path : String) return Boolean is
+   begin
+      Ada.Streams.Stream_IO.Create
+        (File => Sink.File,
+         Mode => Ada.Streams.Stream_IO.Out_File,
+         Name => Path);
+      Sink.Is_Open := True;
+      return True;
+   exception
+      when others =>
+         Sink.Is_Open := False;
+         return False;
+   end File_Sink_Init;
+
+   procedure File_Sink_Close (Sink : in out Output_Sink) is
+   begin
+      if Sink.Is_Open then
+         Ada.Streams.Stream_IO.Close (Sink.File);
+         Sink.Is_Open := False;
+      end if;
+   exception
+      when others =>
+         null;
+   end File_Sink_Close;
+
+   function File_Sink_Write (Sink : in out Output_Sink; Data : String) return Boolean is
+      use Ada.Streams;
+      use Ada.Streams.Stream_IO;
+      Buf : Stream_Element_Array (1 .. Stream_Element_Offset (Data'Length));
+      J   : Stream_Element_Offset := 1;
+   begin
+      if not Sink.Is_Open then
+         return False;
+      end if;
+
+      for I in Data'Range loop
+         Buf (J) := Stream_Element (Character'Pos (Data (I)));
+         J := J + 1;
+      end loop;
+
+      Write (Sink.File, Buf);
+      return True;
+   exception
+      when others =>
+         return False;
+   end File_Sink_Write;
+
+   function File_Sink_Write_Char (Sink : in out Output_Sink; C : Character) return Boolean is
+      use Ada.Streams;
+      use Ada.Streams.Stream_IO;
+      Buf : Stream_Element_Array (1 .. 1);
+   begin
+      if not Sink.Is_Open then
+         return False;
+      end if;
+
+      Buf (1) := Stream_Element (Character'Pos (C));
+      Write (Sink.File, Buf);
+      return True;
+   exception
+      when others =>
+         return False;
+   end File_Sink_Write_Char;
+
+   -- safe_uint64_power(base, exp, *out) -> Boolean success (no overflow)
+   function Safe_Uint64_Power
+     (Base   : Unsigned_64;
+      Exp    : Unsigned_64;
+      Result : out Unsigned_64) return Boolean
+   is
+      R : Unsigned_64 := 1;
+      I : Unsigned_64 := 0;
+   begin
+      Result := 1;
+
+      while I < Exp loop
+         if Base = 0 then
+            R := 0;
+         else
+            -- overflow check: R * Base must fit in Unsigned_64
+            if R > Unsigned_64'Last / Base then
+               Result := 0;
+               return False;
+            end if;
+            R := R * Base;
+         end if;
+
+         I := I + 1;
+      end loop;
+
+      Result := R;
+      return True;
+   end Safe_Uint64_Power;
+
+   -- generate_permutations(len, sink) -> Boolean
+   function Generate_Permutations
+     (Len  : Natural;
+      Sink : in out Output_Sink) return Boolean
+   is
+      Total : Unsigned_64 := 0;
+      I     : Unsigned_64 := 0;
+   begin
+      if not Safe_Uint64_Power (Base => 64, Exp => Unsigned_64 (Len), Result => Total) then
+         return False;
+      end if;
+
+      if Len = 0 then
+         -- Matches the assembly behavior: total = 1; write empty string + '\n'
+         return File_Sink_Write_Char (Sink, LF);
+      end if;
+
+      declare
+         Buffer : String (1 .. Len);
+      begin
+         while I < Total loop
+            declare
+               Tmp : Unsigned_64 := I;
+            begin
+               -- Fill from right to left: base-64 digits (Tmp & 63), then Tmp >>= 6
+               for Pos in reverse Buffer'Range loop
+                  declare
+                     Idx : Natural := Natural (Tmp and 63); -- 0..63
+                  begin
+                     Buffer (Pos) := Alphabet (Alphabet'First + Idx);
+                  end;
+                  Tmp := Shift_Right (Tmp, 6);
+               end loop;
+            end;
+
+            if not File_Sink_Write (Sink, Buffer) then
+               return False;
+            end if;
+
+            if not File_Sink_Write_Char (Sink, LF) then
+               return False;
+            end if;
+
+            I := I + 1;
+         end loop;
+      end;
+
+      return True;
+   end Generate_Permutations;
+
+   -- main equivalents
+   Sink     : Output_Sink;
+   Len      : Natural := 4;
+   Out_Path : String  := Default_Out_Path;
+   Ok       : Boolean := False;
+
+begin
+   -- Optional CLI override:
+   --   arg1 = length (Natural), arg2 = output path
+   if Ada.Command_Line.Argument_Count >= 1 then
+      declare
+         use Ada.Text_IO;
+      begin
+         Len := Natural'Value (Ada.Command_Line.Argument (1));
+      exception
+         when others =>
+            -- If parse fails, keep default
+            null;
+      end;
+   end if;
+
+   if Ada.Command_Line.Argument_Count >= 2 then
+      Out_Path := Ada.Command_Line.Argument (2);
+   end if;
+
+   if not File_Sink_Init (Sink, Out_Path) then
+      Ada.Text_IO.Put_Line (Ada.Text_IO.Standard_Error, Err_Open_Msg);
+      Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Failure);
+      return;
+   end if;
+
+   Ok := Generate_Permutations (Len, Sink);
+
+   File_Sink_Close (Sink);
+
+   if not Ok then
+      Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Failure);
+   else
+      Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Success);
+   end if;
+end System_Safe;

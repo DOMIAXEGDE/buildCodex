@@ -1,0 +1,143 @@
+// D.txt
+// Converted from assembly.txt (x86-64) into equivalent D source.
+//
+// Behavior matches the assembly:
+//
+// - ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, newline.
+// - safe_uint64_power(64, N) detects overflow in u64.
+// - generate_permutations(N, &sink) emits 64^N tokens, each N bytes, derived from i in base-64
+//   (low 6 bits per digit, filled from right to left), and then appends '\n'.
+// - main uses N = 4 and output path "system_safe.txt".
+//
+// Build (Linux/macOS):
+//   dmd -O -release main.d
+// or
+//   ldc2 -O3 -release main.d
+//
+// Run:
+//   ./main
+//
+// Output:
+//   system_safe.txt
+//
+// NOTE: Because ALPHABET includes '\n' as its last character, some generated tokens contain embedded
+// newlines in addition to the trailing '\n'. This is intentional and matches the assembly output.
+
+module main;
+
+import core.stdc.stdio : FILE, fopen, fwrite, fputc, fclose, perror, EOF;
+import core.stdc.stdlib : exit;
+import core.stdc.string : strlen;
+import core.stdc.stdint : uint64_t, UINT64_MAX;
+import core.stdc.stddef : size_t;
+
+alias u64 = uint64_t;
+
+enum ubyte[64] ALPHABET = cast(ubyte[64])"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n";
+
+alias WriteFn = bool function(void* ctx, const(char)* bytes, size_t len) nothrow @nogc;
+alias WriteCharFn = bool function(void* ctx, char c) nothrow @nogc;
+
+struct OutputSink {
+    void* ctx;
+    WriteFn write;
+    WriteCharFn writeChar;
+}
+
+nothrow @nogc
+bool safe_uint64_power(u64 base, u64 exp, u64* out) {
+    if (out is null) return false;
+
+    *out = 1;
+    for (u64 i = 0; i < exp; i++) {
+        // Detect overflow in (*out) * base.
+        if (base != 0 && *out > (UINT64_MAX / base)) {
+            return false;
+        }
+        *out *= base;
+    }
+    return true;
+}
+
+nothrow @nogc
+bool file_sink_write(void* ctx, const(char)* bytes, size_t len) {
+    if (ctx is null || bytes is null) return false;
+    auto fp = cast(FILE*)ctx;
+    const size_t wrote = fwrite(cast(const(void)*)bytes, 1, len, fp);
+    return wrote == len;
+}
+
+nothrow @nogc
+bool file_sink_write_char(void* ctx, char c) {
+    if (ctx is null) return false;
+    auto fp = cast(FILE*)ctx;
+    return fputc(cast(int)c, fp) != EOF;
+}
+
+nothrow @nogc
+bool file_sink_init(OutputSink* sink, const(char)* path) {
+    if (sink is null || path is null) return false;
+
+    auto fp = fopen(path, "w");
+    if (fp is null) return false;
+
+    sink.ctx = cast(void*)fp;
+    sink.write = &file_sink_write;
+    sink.writeChar = &file_sink_write_char;
+    return true;
+}
+
+nothrow @nogc
+void file_sink_close(OutputSink* sink) {
+    if (sink is null) return;
+    if (sink.ctx !is null) {
+        auto fp = cast(FILE*)sink.ctx;
+        fclose(fp);
+        sink.ctx = null;
+    }
+}
+
+bool generate_permutations(u64 n, OutputSink* sink) {
+    if (sink is null || sink.write is null || sink.writeChar is null) return false;
+
+    u64 limit = 0;
+    if (!safe_uint64_power(64, n, &limit)) return false;
+
+    // The assembly uses a stack buffer and writes exactly N bytes each iteration.
+    // Here we allocate an N-byte array on the GC heap; for N=4 this is tiny.
+    // (If you want @nogc end-to-end, use a fixed-size buffer as in the assembly.)
+    auto buf = new ubyte[](cast(size_t)n);
+
+    for (u64 i = 0; i < limit; i++) {
+        u64 v = i;
+
+        // Fill from right to left.
+        for (long pos = cast(long)n - 1; pos >= 0; pos--) {
+            const size_t idx = cast(size_t)(v & 63);
+            buf[cast(size_t)pos] = ALPHABET[idx];
+            v >>= 6;
+        }
+
+        if (!sink.write(sink.ctx, cast(const(char)*)buf.ptr, buf.length)) return false;
+        if (!sink.writeChar(sink.ctx, '\n')) return false;
+    }
+
+    return true;
+}
+
+extern(C) int main() {
+    enum u64 N = 4;
+    enum string OUT_PATH = "system_safe.txt";
+    enum string ERR_MSG = "Error opening file";
+
+    OutputSink sink;
+    if (!file_sink_init(&sink, OUT_PATH.ptr)) {
+        perror(ERR_MSG.ptr);
+        return 1;
+    }
+
+    const bool ok = generate_permutations(N, &sink);
+    file_sink_close(&sink);
+
+    return ok ? 0 : 1;
+}

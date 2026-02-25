@@ -1,0 +1,248 @@
+/*
+  =====================================================================
+  A++ Monolith: system_safe_permutations.a++
+  =====================================================================
+
+  Source-equivalent translation of assembly.txt. :contentReference[oaicite:1]{index=1}
+
+  What it does:
+    - ALPHABET is 64 symbols: a-z A-Z 0-9 ' ' '\n'
+    - For n = 4 (main), enumerates all 64^n codes.
+    - Each code is written as raw bytes (NOT NUL-terminated), then a '\n'.
+    - NOTE: because '\n' is itself a symbol in ALPHABET, some generated
+      codes contain newline bytes *inside* the code, which will visually
+      break lines in the output file (this matches the assembly behavior).
+
+  Output size for n=4:
+    - 64^4 = 16,777,216 records (huge).
+*/
+
+/* =========================
+   A++: Core scalar types
+   ========================= */
+
+type  U8   = unsigned_8;
+type  U32  = unsigned_32;
+type  U64  = unsigned_64;
+type  U128 = unsigned_128;
+type  I32  = signed_32;
+type  Bool = unsigned_8;   // 0 or 1
+
+const Bool FALSE = 0;
+const Bool TRUE  = 1;
+
+const U64 U64_MAX = 18446744073709551615;
+
+/* =========================
+   A++: Minimal FFI surface
+   =========================
+   These are abstract bindings to the host C runtime.
+*/
+
+opaque type FILE;
+
+/* C stdio bindings */
+extern func fopen(path: ptr<const U8>, mode: ptr<const U8>) -> ptr<FILE>;
+extern func fclose(f: ptr<FILE>) -> I32;
+extern func fwrite(buf: ptr<const U8>, size: U64, count: U64, f: ptr<FILE>) -> U64;
+extern func fputc(ch: I32, f: ptr<FILE>) -> I32;
+extern func perror(msg: ptr<const U8>) -> void;
+
+/* =========================
+   A++: Memory helpers
+   ========================= */
+
+extern func malloc(n: U64) -> ptr<U8>;
+extern func free(p: ptr<U8>) -> void;
+
+/* =========================
+   A++: OutputSink interface
+   ========================= */
+
+type WriteFn     = func(ctx: ptr<void>, buf: ptr<const U8>, len: U64) -> Bool;
+type WriteCharFn = func(ctx: ptr<void>, ch: U8) -> Bool;
+
+struct OutputSink {
+  ctx: ptr<void>;
+  write: WriteFn;
+  write_char: WriteCharFn;
+}
+
+/* =========================
+   Embedded Alphabet (64 bytes)
+   Matches:
+     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567"
+     "89 \n"
+   ========================= */
+
+const U8 ALPHABET[64] = [
+  'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
+  'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+  '0','1','2','3','4','5','6','7','8','9',' ','\n'
+];
+
+/* =========================
+   Safe arithmetic
+   ========================= */
+
+func u64_mul_overflow(a: U64, b: U64, out: ptr<U64>) -> Bool {
+  // Implements the same intent as the assembly's MUL + overflow flag test.
+  // Here, we use a widened multiplication and compare against U64_MAX.
+  let wide: U128 = (U128)a * (U128)b;
+  if wide > (U128)U64_MAX {
+    return TRUE;  // overflow occurred
+  }
+  *out = (U64)wide;
+  return FALSE;   // no overflow
+}
+
+/*
+  safe_uint64_power(base, exp, out):
+    out := base^exp, returning TRUE on success, FALSE on overflow.
+  This matches the assembly routine that multiplies exp times, checking overflow.
+*/
+func safe_uint64_power(base: U64, exp: U64, out: ptr<U64>) -> Bool {
+  *out = 1;
+  let i: U64 = 0;
+
+  while i < exp {
+    let tmp: U64 = 0;
+    let ov: Bool = u64_mul_overflow(*out, base, &tmp);
+    if ov == TRUE {
+      return FALSE;
+    }
+    *out = tmp;
+    i = i + 1;
+  }
+
+  return TRUE;
+}
+
+/* =========================
+   File sink implementation
+   ========================= */
+
+func file_sink_write(ctx: ptr<void>, buf: ptr<const U8>, len: U64) -> Bool {
+  let f: ptr<FILE> = (ptr<FILE>)ctx;
+
+  // fwrite(buf, 1, len, f) must return len to succeed.
+  let wrote: U64 = fwrite(buf, 1, len, f);
+  if wrote == len { return TRUE; }
+  return FALSE;
+}
+
+func file_sink_write_char(ctx: ptr<void>, ch: U8) -> Bool {
+  let f: ptr<FILE> = (ptr<FILE>)ctx;
+
+  // fputc returns -1 on error.
+  let rc: I32 = fputc((I32)ch, f);
+  if rc != -1 { return TRUE; }
+  return FALSE;
+}
+
+func file_sink_init(sink: ptr<OutputSink>, path: ptr<const U8>) -> Bool {
+  const U8 MODE_W[2] = ['w', 0];
+
+  let f: ptr<FILE> = fopen(path, &MODE_W[0]);
+  if f == (ptr<FILE>)0 {
+    return FALSE;
+  }
+
+  sink->ctx = (ptr<void>)f;
+  sink->write = file_sink_write;
+  sink->write_char = file_sink_write_char;
+  return TRUE;
+}
+
+func file_sink_close(sink: ptr<OutputSink>) -> void {
+  if sink == (ptr<OutputSink>)0 { return; }
+  if sink->ctx == (ptr<void>)0 { return; }
+
+  let f: ptr<FILE> = (ptr<FILE>)sink->ctx;
+  fclose(f);
+  sink->ctx = (ptr<void>)0;
+}
+
+/* =========================
+   Permutation generator
+   =========================
+   generate_permutations(n, sink):
+     total = 64^n
+     for i in [0..total-1]:
+       encode i in base64 digits (6-bit chunks) into n bytes:
+         idx = (tmp & 63)
+         tmp >>= 6
+       write n bytes then '\n'
+*/
+
+func generate_permutations(n: U64, sink: ptr<OutputSink>) -> Bool {
+  let total: U64 = 0;
+
+  if safe_uint64_power(64, n, &total) == FALSE {
+    return FALSE;
+  }
+
+  // Allocate exactly n bytes (no NUL terminator), matching fwrite usage.
+  let buf: ptr<U8> = malloc(n);
+  if buf == (ptr<U8>)0 {
+    return FALSE;
+  }
+
+  let i: U64 = 0;
+  while i < total {
+
+    let tmp: U64 = i;
+
+    // Fill from end to start: pos = n-1 down to 0
+    // Matches the assembly decrementing an index and writing into [rbp-50 + pos].
+    let pos: I32 = (I32)(n - 1);
+
+    while pos >= 0 {
+      let idx: U64 = (tmp & 63);
+      buf[(U64)pos] = ALPHABET[idx];
+      tmp = (tmp >> 6);
+      pos = pos - 1;
+    }
+
+    if sink->write(sink->ctx, buf, n) == FALSE {
+      free(buf);
+      return FALSE;
+    }
+
+    if sink->write_char(sink->ctx, (U8)10) == FALSE { // '\n'
+      free(buf);
+      return FALSE;
+    }
+
+    i = i + 1;
+  }
+
+  free(buf);
+  return TRUE;
+}
+
+/* =========================
+   Program entrypoint
+   ========================= */
+
+func main() -> I32 {
+  const U8 OUT_PATH[] = "system_safe.txt\0";
+  const U8 ERR_MSG[]  = "Error opening file\0";
+
+  let sink: OutputSink;
+
+  // In the assembly, n is set to 4.
+  let n: U64 = 4;
+
+  if file_sink_init(&sink, &OUT_PATH[0]) == FALSE {
+    perror(&ERR_MSG[0]);
+    return 1;
+  }
+
+  let ok: Bool = generate_permutations(n, &sink);
+
+  file_sink_close(&sink);
+
+  if ok == TRUE { return 0; }
+  return 1;
+}

@@ -1,0 +1,125 @@
+// cpp.txt
+// High-level C++ translation of the attached x86-64 assembly.
+//
+// What it does (same behavior as assembly):
+// - Defines a 64-character alphabet (a-z, A-Z, 0-9, space, newline).
+// - Computes 64^N safely in uint64_t (detecting overflow).
+// - Iterates i in [0, 64^N) and maps i to an N-character "base-64" word using the alphabet.
+// - Writes each word, then writes '\n', to "system_safe.txt".
+//
+// NOTE: For N=4 this writes 16,777,216 lines (~80+ MiB). Increase N with care.
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <string>
+
+static constexpr char ALPHABET[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567"
+    "89 \n"; // total 64 chars
+
+struct OutputSink {
+    void* ctx = nullptr; // e.g., FILE*
+    bool (*write)(void*, const char*, unsigned long) = nullptr;
+    bool (*write_char)(void*, char) = nullptr;
+};
+
+// Returns true on success, false if uint64 overflow would occur.
+// Computes: *out = base^exp, using repeated multiplication (as in the assembly).
+static bool safe_uint64_power(std::uint64_t base, std::uint64_t exp, std::uint64_t* out) {
+    if (!out) return false;
+    std::uint64_t value = 1;
+
+    for (std::uint64_t i = 0; i < exp; ++i) {
+        if (base != 0 && value > (std::numeric_limits<std::uint64_t>::max() / base)) {
+            return false; // overflow
+        }
+        value *= base;
+    }
+
+    *out = value;
+    return true;
+}
+
+static bool generate_permutations(std::uint64_t n, OutputSink* sink) {
+    if (!sink || !sink->write || !sink->write_char) return false;
+
+    std::uint64_t total = 0;
+    if (!safe_uint64_power(64ULL, n, &total)) {
+        return false;
+    }
+
+    std::string buf;
+    buf.resize(static_cast<std::size_t>(n));
+
+    for (std::uint64_t i = 0; i < total; ++i) {
+        std::uint64_t x = i;
+
+        // Fill from the end down to 0 (same as the assembly).
+        // Uses 6-bit chunks (x & 63), then shifts x >>= 6.
+        for (std::int64_t idx = static_cast<std::int64_t>(n) - 1; idx >= 0; --idx) {
+            std::uint64_t a = (x & 63ULL);
+            buf[static_cast<std::size_t>(idx)] = ALPHABET[a];
+            x >>= 6;
+        }
+
+        if (!sink->write(sink->ctx, buf.data(), static_cast<unsigned long>(n))) {
+            return false;
+        }
+        if (!sink->write_char(sink->ctx, '\n')) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// --- File sink implementation (matches the assembly's semantics) ---
+
+static bool file_sink_write(void* ctx, const char* data, unsigned long len) {
+    std::FILE* f = static_cast<std::FILE*>(ctx);
+    if (!f) return false;
+    return std::fwrite(data, 1, len, f) == len;
+}
+
+static bool file_sink_write_char(void* ctx, char c) {
+    std::FILE* f = static_cast<std::FILE*>(ctx);
+    if (!f) return false;
+    return std::fputc(static_cast<unsigned char>(c), f) != EOF;
+}
+
+static bool file_sink_init(OutputSink* sink, const char* path) {
+    if (!sink || !path) return false;
+
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) return false;
+
+    sink->ctx = f;
+    sink->write = &file_sink_write;
+    sink->write_char = &file_sink_write_char;
+    return true;
+}
+
+static void file_sink_close(OutputSink* sink) {
+    if (!sink) return;
+    if (sink->ctx) {
+        std::fclose(static_cast<std::FILE*>(sink->ctx));
+        sink->ctx = nullptr;
+    }
+}
+
+int main() {
+    const std::uint64_t N = 4; // same as assembly main
+
+    OutputSink sink;
+    if (!file_sink_init(&sink, "system_safe.txt")) {
+        std::perror("Error opening file");
+        return 1;
+    }
+
+    const bool ok = generate_permutations(N, &sink);
+
+    file_sink_close(&sink);
+    return ok ? 0 : 1;
+}

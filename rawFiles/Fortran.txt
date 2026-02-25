@@ -1,0 +1,178 @@
+! Fortran.txt
+! Converted from assembly.txt (x86-64) into equivalent Fortran (F2008+) source.
+!
+! Behavior matches the assembly:
+! - ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, newline.
+! - safe_uint64_power(64, N) detects overflow (within signed int64 range).
+! - generate_permutations(N, sink) emits 64^N tokens, each N bytes derived from i in base-64
+!   (low 6 bits per digit, filled from right to left), then appends '\n'.
+! - main uses N = 4 and output path "system_safe.txt".
+!
+! Build (gfortran):
+!   gfortran -O2 -std=f2008 main.f90 -o system_safe
+!
+! Run:
+!   ./system_safe
+!
+! Output:
+!   system_safe.txt
+!
+! NOTE: Because ALPHABET includes '\n' as its last character, some generated tokens contain embedded
+! newlines in addition to the trailing '\n'. This is intentional and matches the assembly output.
+
+module system_safe_mod
+  use, intrinsic :: iso_fortran_env, only: int64
+  implicit none
+  private
+  public :: OutputSink, safe_uint64_power, generate_permutations
+
+  character(len=64), parameter :: ALPHABET = &
+       "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " // achar(10)
+
+  type :: OutputSink
+     integer :: unit = -1
+     logical :: is_open = .false.
+   contains
+     procedure :: init       => file_sink_init
+     procedure :: write_bytes => file_sink_write
+     procedure :: write_char  => file_sink_write_char
+     procedure :: close      => file_sink_close
+  end type OutputSink
+
+contains
+
+  logical function safe_uint64_power(base, exp, out) result(ok)
+    integer(int64), intent(in)  :: base, exp
+    integer(int64), intent(out) :: out
+    integer(int64) :: i
+
+    out = 1_int64
+    ok = .true.
+
+    do i = 1_int64, exp
+       if (base /= 0_int64) then
+          ! Overflow check (conservative for signed int64)
+          if (out > huge(out) / base) then
+             ok = .false.
+             return
+          end if
+       end if
+       out = out * base
+    end do
+  end function safe_uint64_power
+
+  logical function file_sink_init(this, path) result(ok)
+    class(OutputSink), intent(inout) :: this
+    character(len=*), intent(in)     :: path
+    integer :: ios
+
+    ok = .false.
+    this%is_open = .false.
+    this%unit = -1
+
+    open(newunit=this%unit, file=path, status="replace", &
+         access="stream", form="unformatted", action="write", iostat=ios)
+
+    if (ios == 0) then
+       this%is_open = .true.
+       ok = .true.
+    end if
+  end function file_sink_init
+
+  logical function file_sink_write(this, bytes) result(ok)
+    class(OutputSink), intent(inout) :: this
+    character(len=*), intent(in)     :: bytes
+    integer :: ios
+
+    if (.not. this%is_open) then
+       ok = .false.
+       return
+    end if
+
+    write(this%unit, iostat=ios) bytes
+    ok = (ios == 0)
+  end function file_sink_write
+
+  logical function file_sink_write_char(this, ch) result(ok)
+    class(OutputSink), intent(inout) :: this
+    character(len=1), intent(in)     :: ch
+    integer :: ios
+
+    if (.not. this%is_open) then
+       ok = .false.
+       return
+    end if
+
+    write(this%unit, iostat=ios) ch
+    ok = (ios == 0)
+  end function file_sink_write_char
+
+  subroutine file_sink_close(this)
+    class(OutputSink), intent(inout) :: this
+    if (this%is_open) then
+       close(this%unit)
+       this%is_open = .false.
+       this%unit = -1
+    end if
+  end subroutine file_sink_close
+
+  logical function generate_permutations(n, sink) result(ok)
+    integer(int64), intent(in)      :: n
+    type(OutputSink), intent(inout) :: sink
+
+    integer(int64) :: limit, i, v, idx
+    integer :: pos, n_int, k
+    character(len=50) :: buf
+
+    ok = .false.
+
+    if (.not. safe_uint64_power(64_int64, n, limit)) return
+    if (n < 0_int64 .or. n > 50_int64) return
+    if (.not. sink%is_open) return
+
+    n_int = int(n)
+
+    do i = 0_int64, limit - 1_int64
+       v = i
+
+       ! Fill from right to left
+       do pos = n_int, 1, -1
+          idx = iand(v, 63_int64)
+          k = int(idx) + 1
+          buf(pos:pos) = ALPHABET(k:k)
+          v = ishft(v, -6)
+       end do
+
+       if (.not. sink%write_bytes(buf(1:n_int))) return
+       if (.not. sink%write_char(achar(10))) return
+    end do
+
+    ok = .true.
+  end function generate_permutations
+
+end module system_safe_mod
+
+
+program system_safe
+  use, intrinsic :: iso_fortran_env, only: int64
+  use system_safe_mod
+  implicit none
+
+  type(OutputSink) :: sink
+  logical :: ok
+
+  ok = sink%init("system_safe.txt")
+  if (.not. ok) then
+     write(*,*) "Error opening file"
+     stop 1
+  end if
+
+  ok = generate_permutations(4_int64, sink)
+  call sink%close()
+
+  if (ok) then
+     stop 0
+  else
+     stop 1
+  end if
+end program system_safe

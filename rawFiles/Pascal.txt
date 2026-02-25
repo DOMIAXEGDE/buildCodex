@@ -1,0 +1,202 @@
+{ Pascal.txt
+  Converted from the x86-64 assembly listing in assembly.txt into equivalent Pascal (FreePascal / Delphi-style) code.
+
+  Behavior matches the assembly:
+
+  - ALPHABET is 64 bytes: a-z, A-Z, 0-9, space, LF (#10).
+  - safe_uint64_power(64, N) detects overflow in 64-bit unsigned arithmetic (QWord).
+  - generate_permutations(N, sink) enumerates i = 0 .. 64^N-1 and forms an N-byte token
+    using base-64 digits (low 6 bits) from right to left, then writes the token and appends LF.
+  - main uses N = 4 and output file "system_safe.txt".
+
+  Build (FreePascal):
+    fpc -O3 -Mobjfpc main.pas
+
+  Run:
+    ./main
+
+  Output:
+    system_safe.txt
+
+  NOTE: Because ALPHABET itself contains LF as its 64th character AND we also append LF after each token,
+  some tokens contain embedded newlines. This is intentional and matches the assembly output.
+}
+
+program system_safe;
+
+{$mode objfpc}{$H+}
+
+uses
+  SysUtils, Classes;
+
+const
+  MaxN = 50;
+
+  // 64-byte alphabet exactly as in the assembly:
+  // "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567" + "89 \n"
+  AlphabetStr: AnsiString =
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' + #10;
+
+type
+  TWriteFn = function(ctx: Pointer; bytes: PAnsiChar; len: QWord): Boolean; cdecl;
+  TWriteCharFn = function(ctx: Pointer; c: AnsiChar): Boolean; cdecl;
+
+  POutputSink = ^TOutputSink;
+  TOutputSink = record
+    ctx: Pointer;         // in the assembly: FILE*
+    write: TWriteFn;      // file_sink_write
+    writeChar: TWriteCharFn; // file_sink_write_char
+  end;
+
+function SafeUInt64Power(const base, exp: QWord; outValue: PQWord): Boolean;
+var
+  i: QWord;
+  r: QWord;
+begin
+  if outValue = nil then Exit(False);
+
+  r := 1;
+  for i := 0 to exp - 1 do
+  begin
+    // Overflow detection: r * base must fit in QWord.
+    if (base <> 0) and (r > High(QWord) div base) then
+      Exit(False);
+    r := r * base;
+  end;
+
+  outValue^ := r;
+  Result := True;
+end;
+
+function FileSinkWrite(ctx: Pointer; bytes: PAnsiChar; len: QWord): Boolean; cdecl;
+var
+  s: TStream;
+  want, wrote: SizeInt;
+begin
+  Result := False;
+  if (ctx = nil) or (bytes = nil) then Exit;
+
+  s := TStream(ctx);
+
+  // In this program len is small (<= 50), but we keep it safe.
+  if len > QWord(High(SizeInt)) then Exit;
+  want := SizeInt(len);
+
+  wrote := s.Write(bytes^, want);
+  Result := (wrote = want);
+end;
+
+function FileSinkWriteChar(ctx: Pointer; c: AnsiChar): Boolean; cdecl;
+var
+  s: TStream;
+  wrote: SizeInt;
+begin
+  Result := False;
+  if ctx = nil then Exit;
+  s := TStream(ctx);
+
+  wrote := s.Write(c, 1);
+  Result := (wrote = 1);
+end;
+
+function FileSinkInit(sink: POutputSink; const path: AnsiString): Boolean;
+var
+  fs: TBufferedFileStream;
+begin
+  Result := False;
+  if sink = nil then Exit;
+
+  try
+    // Equivalent to fopen(path, "w"): create/truncate for writing.
+    fs := TBufferedFileStream.Create(path, fmCreate);
+  except
+    Exit(False);
+  end;
+
+  sink^.ctx := Pointer(fs);
+  sink^.write := @FileSinkWrite;
+  sink^.writeChar := @FileSinkWriteChar;
+  Result := True;
+end;
+
+procedure FileSinkClose(sink: POutputSink);
+var
+  s: TObject;
+begin
+  if (sink = nil) or (sink^.ctx = nil) then Exit;
+
+  s := TObject(sink^.ctx);
+  sink^.ctx := nil;
+  sink^.write := nil;
+  sink^.writeChar := nil;
+
+  // Close by freeing the stream.
+  s.Free;
+end;
+
+function GeneratePermutations(const n: QWord; sink: POutputSink): Boolean;
+var
+  limit: QWord;
+  buf: array[0..MaxN-1] of AnsiChar;
+  i, v: QWord;
+  pos: Integer;
+  idx: QWord;
+begin
+  Result := False;
+
+  if (sink = nil) or (sink^.ctx = nil) or (not Assigned(sink^.write)) or (not Assigned(sink^.writeChar)) then
+    Exit(False);
+
+  if (Length(AlphabetStr) <> 64) then
+    Exit(False);
+
+  if n > MaxN then
+    Exit(False);
+
+  if not SafeUInt64Power(64, n, @limit) then
+    Exit(False);
+
+  // Enumerate all 64^N tokens.
+  for i := 0 to limit - 1 do
+  begin
+    v := i;
+
+    // Fill token from right to left (pos = n-1 .. 0).
+    for pos := Integer(n) - 1 downto 0 do
+    begin
+      idx := v and 63; // 0..63
+      buf[pos] := AlphabetStr[Integer(idx) + 1]; // Pascal strings are 1-based
+      v := v shr 6;
+    end;
+
+    // Write exactly N bytes, then a newline.
+    if (n > 0) then
+      if not sink^.write(sink^.ctx, @buf[0], n) then Exit(False);
+
+    if not sink^.writeChar(sink^.ctx, #10) then Exit(False);
+  end;
+
+  Result := True;
+end;
+
+var
+  Sink: TOutputSink;
+  Ok: Boolean;
+begin
+  FillChar(Sink, SizeOf(Sink), 0);
+
+  // main: N = 4, output path "system_safe.txt"
+  if not FileSinkInit(@Sink, 'system_safe.txt') then
+  begin
+    Writeln(ErrOutput, 'Error opening file: ', SysErrorMessage(GetLastOSError));
+    Halt(1);
+  end;
+
+  Ok := GeneratePermutations(4, @Sink);
+  FileSinkClose(@Sink);
+
+  if Ok then
+    Halt(0)
+  else
+    Halt(1);
+end.

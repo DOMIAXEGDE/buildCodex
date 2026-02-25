@@ -1,0 +1,178 @@
+BEGIN
+  COMMENT
+    Monolithic ABC ALGOL (Algol-family) translation of assembly.txt.
+
+    Behaviour (matches the assembly):
+      - ALPHABET is 64 chars: a-z A-Z 0-9 space newline
+      - safe_uint64_power(64, n, limit) returns FALSE if overflow would occur
+      - generate_permutations(n, sink) enumerates i = 0 .. limit-1
+        converts i to base-64 (6-bit chunks) into an n-char buffer
+        writes buffer (n chars), then writes newline '\n' (ASCII 10)
+      - main uses n = 4 and writes to "system_safe.txt"
+
+    Notes:
+      - Syntax here is an Algol-60-ish "ABC ALGOL" style with simple FILE I/O
+        primitives (OPENWRITE / CLOSE / PUTCHAR / PUTSTRING). If your target
+        ABC ALGOL dialect uses different I/O names, only those calls need
+        renaming; the core logic is the same.
+  ;
+
+  COMMENT -------- Constants -------- ;
+
+  STRING ALPHABET;
+  ALPHABET := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n";
+
+  LONG INTEGER UINT64_MAX;
+  UINT64_MAX := 18446744073709551615;  COMMENT 2^64 - 1 ;
+
+  COMMENT -------- Minimal OutputSink -------- ;
+
+  RECORD OutputSink (FILE f);
+
+  BOOLEAN PROCEDURE file_sink_init(sink, filename);
+    VALUE filename; STRING filename;
+    OutputSink sink;
+  BEGIN
+    FILE tmp;
+    tmp := OPENWRITE(filename);             COMMENT open file for writing ;
+    IF tmp = NIL THEN
+      BEGIN
+        file_sink_init := FALSE
+      END
+    ELSE
+      BEGIN
+        sink.f := tmp;
+        file_sink_init := TRUE
+      END
+  END;
+
+  PROCEDURE file_sink_close(sink);
+    OutputSink sink;
+  BEGIN
+    IF sink.f <> NIL THEN
+      BEGIN
+        CLOSE(sink.f);
+        sink.f := NIL
+      END
+  END;
+
+  BOOLEAN PROCEDURE sink_write(sink, buf, len);
+    OutputSink sink;
+    VALUE len; INTEGER len;
+    CHARACTER ARRAY buf;
+  BEGIN
+    INTEGER i;
+    FOR i := 0 STEP 1 UNTIL len - 1 DO
+      PUTCHAR(sink.f, buf[i]);
+    sink_write := TRUE
+  END;
+
+  BOOLEAN PROCEDURE sink_write_char(sink, ch);
+    OutputSink sink;
+    VALUE ch; INTEGER ch;
+  BEGIN
+    PUTCHAR(sink.f, ch);
+    sink_write_char := TRUE
+  END;
+
+  COMMENT -------- Safe uint64 power -------- ;
+
+  BOOLEAN PROCEDURE safe_uint64_power(base, exp, out);
+    VALUE base, exp; LONG INTEGER base, exp;
+    LONG INTEGER out;
+  BEGIN
+    LONG INTEGER i;
+    out := 1;
+
+    FOR i := 1 STEP 1 UNTIL exp DO
+      BEGIN
+        COMMENT overflow check: out * base <= UINT64_MAX ;
+        IF (base <> 0) AND (out > (UINT64_MAX DIV base)) THEN
+          BEGIN
+            safe_uint64_power := FALSE;
+            GOTO done
+          END;
+        out := out * base
+      END;
+
+    safe_uint64_power := TRUE;
+
+    done: ;
+  END;
+
+  COMMENT -------- Alphabet indexing helper -------- ;
+
+  CHARACTER PROCEDURE alphabet_at(idx);
+    VALUE idx; INTEGER idx;  COMMENT idx in 0..63 ;
+  BEGIN
+    COMMENT ALPHABET is treated as 1-based for SUB/CHAR extraction below ;
+    alphabet_at := CHAR(ALPHABET, idx + 1)
+  END;
+
+  COMMENT -------- Generate permutations (actually all base-64 strings) -------- ;
+
+  BOOLEAN PROCEDURE generate_permutations(n, sink);
+    VALUE n; INTEGER n;
+    OutputSink sink;
+  BEGIN
+    LONG INTEGER limit;
+    LONG INTEGER i, tmp;
+    INTEGER pos, digit;
+    CHARACTER ARRAY buf[0:n-1];
+    BOOLEAN ok;
+
+    ok := safe_uint64_power(64, n, limit);
+    IF NOT ok THEN
+      BEGIN
+        generate_permutations := FALSE;
+        GOTO done
+      END;
+
+    FOR i := 0 STEP 1 UNTIL limit - 1 DO
+      BEGIN
+        tmp := i;
+
+        FOR pos := n - 1 STEP -1 UNTIL 0 DO
+          BEGIN
+            digit := ENTIER(tmp MOD 64);        COMMENT low 6 bits ;
+            buf[pos] := alphabet_at(digit);
+            tmp := tmp DIV 64
+          END;
+
+        IF NOT sink_write(sink, buf, n) THEN
+          BEGIN
+            generate_permutations := FALSE;
+            GOTO done
+          END;
+
+        IF NOT sink_write_char(sink, 10) THEN  COMMENT '\n' ;
+          BEGIN
+            generate_permutations := FALSE;
+            GOTO done
+          END
+      END;
+
+    generate_permutations := TRUE;
+
+    done: ;
+  END;
+
+  COMMENT -------- main -------- ;
+
+  OutputSink sink;
+  BOOLEAN ok;
+
+  ok := file_sink_init(sink, "system_safe.txt");
+  IF NOT ok THEN
+    BEGIN
+      PUTSTRING(OUT, "Error opening file");
+      PUTCHAR(OUT, 10);
+      STOP(1)
+    END;
+
+  ok := generate_permutations(4, sink);
+  file_sink_close(sink);
+
+  IF NOT ok THEN STOP(1) ELSE STOP(0)
+
+END

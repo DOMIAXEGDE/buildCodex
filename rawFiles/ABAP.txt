@@ -1,0 +1,146 @@
+REPORT z_system_safe_generate.
+
+*----------------------------------------------------------------------
+* Direct translation of assembly.txt :contentReference[oaicite:1]{index=1}
+*
+* ALPHABET (64 symbols):
+*   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ␊"
+* where the final symbol is LF (0x0A).
+*
+* Generates all length-N words over this alphabet:
+*   for i in [0 .. 64^N - 1]:
+*     word[j] = ALPHABET[ (i >> (6*(N-1-j))) & 63 ]
+*     write(word, N); write_char(10)
+*
+* ABAP notes:
+* - OPEN DATASET writes to the *application server* filesystem.
+* - Output is written in BINARY MODE to preserve embedded LF symbol.
+* - Practical limit: N <= 10 (64^10 = 2^60 fits in signed INT8).
+*----------------------------------------------------------------------
+
+PARAMETERS:
+  p_n    TYPE i      DEFAULT 4,
+  p_file TYPE string LOWER CASE DEFAULT 'system_safe.txt'.
+
+DATA:
+  gv_alpha_str TYPE string,
+  gv_alpha_x   TYPE xstring.
+
+CONSTANTS:
+  gc_base     TYPE i     VALUE 64,
+  gc_lf_x     TYPE x     VALUE '0A',
+  gc_int8_max TYPE int8  VALUE 9223372036854775807.
+
+INITIALIZATION.
+  " 26 lower + 26 upper + 10 digits + space + LF = 64 symbols
+  gv_alpha_str = |abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 | &&
+                 cl_abap_char_utilities=>newline.
+
+  gv_alpha_x = cl_abap_conv_out_ce=>create(
+                 encoding = 'UTF-8'
+               )->convert( data = gv_alpha_str ).
+
+START-OF-SELECTION.
+
+  DATA(lv_limit) TYPE int8.
+  IF p_n < 1 OR p_n > 10.
+    WRITE: / |Error: p_n must be between 1 and 10 (requested { p_n }).|.
+    RETURN.
+  ENDIF.
+
+  IF safe_pow_int8( iv_base = gc_base iv_exp = p_n CHANGING cv_pow = lv_limit ) = abap_false.
+    WRITE: / |Error: overflow computing 64^{ p_n } within INT8 range.|.
+    RETURN.
+  ENDIF.
+
+  OPEN DATASET p_file FOR OUTPUT IN BINARY MODE.
+  IF sy-subrc <> 0.
+    WRITE: / |Error opening file on application server: "{ p_file }" (sy-subrc={ sy-subrc }).|.
+    RETURN.
+  ENDIF.
+
+  DATA(lv_ok) = generate_permutations_to_dataset( iv_n = p_n iv_limit = lv_limit iv_file = p_file ).
+
+  CLOSE DATASET p_file.
+
+  IF lv_ok = abap_true.
+    WRITE: / |Done. Wrote 64^{ p_n } records to "{ p_file }" (binary).|.
+  ELSE.
+    WRITE: / |Stopped early due to a write error (sy-subrc={ sy-subrc }).|.
+  ENDIF.
+
+*----------------------------------------------------------------------
+* safe_uint64_power equivalent (bounded to signed INT8 in ABAP)
+*----------------------------------------------------------------------
+FORM safe_pow_int8
+  USING    iv_base TYPE i
+           iv_exp  TYPE i
+  CHANGING cv_pow  TYPE int8
+  RETURNING VALUE(rv_ok) TYPE abap_bool.
+
+  cv_pow = 1.
+  rv_ok  = abap_true.
+
+  DO iv_exp TIMES.
+    " overflow check: cv_pow * iv_base <= gc_int8_max
+    IF cv_pow > ( gc_int8_max DIV iv_base ).
+      rv_ok = abap_false.
+      EXIT.
+    ENDIF.
+    cv_pow = cv_pow * iv_base.
+  ENDDO.
+ENDFORM.
+
+*----------------------------------------------------------------------
+* generate_permutations equivalent: stream to OPEN DATASET (binary)
+*----------------------------------------------------------------------
+FORM generate_permutations_to_dataset
+  USING    iv_n     TYPE i
+           iv_limit TYPE int8
+           iv_file  TYPE string
+  RETURNING VALUE(rv_ok) TYPE abap_bool.
+
+  rv_ok = abap_true.
+
+  " Buffer (n bytes + 1 LF). Use a fixed X field then slice.
+  DATA lv_buf   TYPE x LENGTH 1024.
+  DATA lv_write TYPE xstring.
+
+  DATA lv_i     TYPE int8 VALUE 0.
+  DATA lv_temp  TYPE int8.
+  DATA lv_pos   TYPE i.
+  DATA lv_idx   TYPE i.
+  DATA lv_len   TYPE i.
+
+  lv_len = iv_n + 1.
+
+  WHILE lv_i < iv_limit.
+
+    CLEAR lv_buf.
+
+    lv_temp = lv_i.
+    lv_pos  = iv_n - 1.
+
+    " Fill from right to left, base-64 digits (MOD/DIV by 64)
+    WHILE lv_pos >= 0.
+      lv_idx = lv_temp MOD gc_base.   " 0..63
+      lv_buf+lv_pos(1) = gv_alpha_x+lv_idx(1).
+      lv_temp = lv_temp DIV gc_base.
+      lv_pos = lv_pos - 1.
+    ENDWHILE.
+
+    " Append LF (same as file_sink_write_char(..., 10))
+    lv_buf+iv_n(1) = gc_lf_x.
+
+    lv_write = lv_buf+0(lv_len).
+
+    TRANSFER lv_write TO iv_file.
+    IF sy-subrc <> 0.
+      rv_ok = abap_false.
+      EXIT.
+    ENDIF.
+
+    lv_i = lv_i + 1.
+  ENDWHILE.
+
+ENDFORM.

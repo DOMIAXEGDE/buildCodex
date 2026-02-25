@@ -1,0 +1,249 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; A+ MONOLITHIC SCRIPT
+;; Name: system_safe_generator.aplus
+;; Source: assembly.txt  (safe_uint64_power, generate_permutations, file sink, main)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+A+::UNIT "system_safe_generator"
+A+::VERSION 1.0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Primitive Types
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+TYPE u8   = UINT(8)
+TYPE u32  = UINT(32)
+TYPE u64  = UINT(64)
+TYPE u128 = UINT(128)
+TYPE i32  = SINT(32)
+TYPE i64  = SINT(64)
+TYPE bool = ENUM { false=0, true=1 }
+
+TYPE ptr[T] = POINTER(T)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Minimal OS / C-ABI Surface (conceptual intrinsics)
+;; (A+ runtimes typically provide equivalents; keep names stable for clarity.)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+TYPE FileHandle = ptr[opaque]
+
+INTRINSIC OS.fopen(path: ptr[u8], mode: ptr[u8]) -> FileHandle
+INTRINSIC OS.fwrite(buf: ptr[u8], size: u64, count: u64, fh: FileHandle) -> u64
+INTRINSIC OS.fputc(ch: i32, fh: FileHandle) -> i32
+INTRINSIC OS.fclose(fh: FileHandle) -> i32
+INTRINSIC OS.perror(msg: ptr[u8]) -> void
+
+INTRINSIC MEM.zero(buf: ptr[u8], n: u64) -> void
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Constants (matches assembly .ascii/.string payloads)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+CONST ALPHABET_STR : BYTES =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+;; Length must be exactly 64:
+;; 26 lower + 26 upper + 10 digits + space + '\n' = 64.
+
+CONST MODE_WRITE : BYTES = "w"
+CONST OUT_PATH   : BYTES = "system_safe.txt"
+CONST ERR_OPEN   : BYTES = "Error opening file"
+
+CONST U64_MAX : u128 = 18446744073709551615  ;; 2^64 - 1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; OutputSink (layout mirrors the idea in assembly: ctx + function pointers)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+STRUCT OutputSink {
+    ctx        : FileHandle
+    write      : fn(ctx: FileHandle, data: ptr[u8], n: u64) -> bool
+    write_char : fn(ctx: FileHandle, ch: u8) -> bool
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Helpers: safe u64 multiply (models x86 MUL overflow test)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN safe_mul_u64(a: u64, b: u64, out: ref u64) -> bool
+{
+    LET prod : u128 = (u128)a * (u128)b
+    IF prod > U64_MAX THEN
+        RETURN false
+    ENDIF
+    out = (u64)prod
+    RETURN true
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; safe_uint64_power(base, exp, out*) -> bool
+;; Assembly behavior:
+;;   *out = 1
+;;   repeat exp times: if overflow return 0 else *out *= base
+;;   return 1 on success
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN safe_uint64_power(base: u64, exp: u64, out: ref u64) -> bool
+{
+    out = 1
+    LET i : u64 = 0
+
+    WHILE i < exp DO
+        LET tmp : u64 = out
+        IF NOT safe_mul_u64(tmp, base, out) THEN
+            RETURN false
+        ENDIF
+        i = i + 1
+    ENDWHILE
+
+    RETURN true
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; file_sink_write(ctx, data, n) -> bool
+;; Assembly uses fwrite(data, 1, n, FILE*) and checks written == n
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN file_sink_write(ctx: FileHandle, data: ptr[u8], n: u64) -> bool
+{
+    LET written : u64 = OS.fwrite(data, 1, n, ctx)
+    RETURN (written == n)
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; file_sink_write_char(ctx, ch) -> bool
+;; Assembly uses fputc(ch, FILE*) and checks != -1
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN file_sink_write_char(ctx: FileHandle, ch: u8) -> bool
+{
+    LET rc : i32 = OS.fputc((i32)ch, ctx)
+    RETURN (rc != -1)
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; file_sink_init(sink*, path) -> bool
+;; Assembly: fopen(path,"w"); on success sets sink.ctx and fn pointers
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN file_sink_init(sink: ref OutputSink, path: BYTES) -> bool
+{
+    LET fh : FileHandle = OS.fopen(&path[0], &MODE_WRITE[0])
+    IF fh == NULL THEN
+        RETURN false
+    ENDIF
+
+    sink.ctx        = fh
+    sink.write      = file_sink_write
+    sink.write_char = file_sink_write_char
+    RETURN true
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; file_sink_close(sink*) -> void
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN file_sink_close(sink: ref OutputSink) -> void
+{
+    IF sink.ctx != NULL THEN
+        OS.fclose(sink.ctx)
+        sink.ctx = NULL
+    ENDIF
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; generate_permutations(n, sink*) -> bool
+;; Assembly behavior:
+;;   total = 64^n  (checked with safe_uint64_power)
+;;   for i in [0, total):
+;;     tmp = i
+;;     idx = n-1 down to 0:
+;;       digit = tmp & 63
+;;       buf[idx] = ALPHABET[digit]
+;;       tmp >>= 6
+;;     sink.write(buf, n) must succeed
+;;     sink.write_char(10) must succeed
+;;   return 1 on full success else 0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN generate_permutations(n: u64, sink: ref OutputSink) -> bool
+{
+    ;; total permutations: 64^n
+    LET total : u64 = 0
+    IF NOT safe_uint64_power(64, n, total) THEN
+        RETURN false
+    ENDIF
+
+    ;; buffer (monolithic, fixed upper bound; we only use first n bytes)
+    ;; assembly uses a small stack buffer; here we cap at 64 for safety.
+    IF n > 64 THEN
+        RETURN false
+    ENDIF
+
+    LET buf : ARRAY[u8, 64]
+    MEM.zero(&buf[0], 64)
+
+    LET i : u64 = 0
+    WHILE i < total DO
+        LET tmp : u64 = i
+        LET idx : i64 = (i64)n - 1
+
+        WHILE idx >= 0 DO
+            LET digit : u64 = tmp & 63
+            buf[(u64)idx] = (u8)ALPHABET_STR[digit]
+            tmp = tmp >> 6
+            idx = idx - 1
+        ENDWHILE
+
+        ;; write n bytes
+        IF NOT sink.write(sink.ctx, &buf[0], n) THEN
+            RETURN false
+        ENDIF
+
+        ;; then write '\n' (LF = 10), matching assembly
+        IF NOT sink.write_char(sink.ctx, (u8)10) THEN
+            RETURN false
+        ENDIF
+
+        i = i + 1
+    ENDWHILE
+
+    RETURN true
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; main
+;; Assembly:
+;;   n = 4
+;;   init sink("system_safe.txt") else perror("Error opening file") and exit 1
+;;   ok = generate_permutations(4, &sink)
+;;   close sink
+;;   return 0 if ok else 1
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FN main() -> i32
+{
+    LET n : u64 = 4
+
+    LET sink : OutputSink
+    sink.ctx        = NULL
+    sink.write      = file_sink_write
+    sink.write_char = file_sink_write_char
+
+    IF NOT file_sink_init(sink, OUT_PATH) THEN
+        OS.perror(&ERR_OPEN[0])
+        RETURN 1
+    ENDIF
+
+    LET ok : bool = generate_permutations(n, sink)
+
+    file_sink_close(sink)
+
+    IF NOT ok THEN
+        RETURN 1
+    ENDIF
+
+    RETURN 0
+}
+
+A+::ENTRY main

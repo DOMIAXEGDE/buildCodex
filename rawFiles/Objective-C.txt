@@ -1,0 +1,157 @@
+// Objective-C.txt
+// Converted from the attached x86-64 assembly listing (safe_uint64_power, generate_permutations,
+// file-backed OutputSink, and main).  fileciteturn0file0
+//
+// Notes:
+// - This program generates all base-64 "digits" strings of length N using a 64-character alphabet.
+// - The number of outputs is 64^N. For N=4, that is 16,777,216 lines (~84 MB including newlines).
+// - Overflow is detected when computing 64^N into a uint64_t.
+//
+// Build (macOS / Xcode toolchain):
+//   clang -fobjc-arc -framework Foundation main.m -O2 -o system_safe
+//
+// Run:
+//   ./system_safe            # defaults: N=4, output=system_safe.txt
+//   ./system_safe 3 out.txt  # N=3, output=out.txt
+
+#import <Foundation/Foundation.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+
+static const char ALPHABET[65] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"; // 64 chars + NUL
+
+static BOOL safe_uint64_power(uint64_t base, uint64_t exp, uint64_t *out) {
+    if (!out) return NO;
+    uint64_t result = 1;
+
+    for (uint64_t i = 0; i < exp; i++) {
+        // Detect overflow: result * base must fit in uint64_t.
+        if (base != 0 && result > UINT64_MAX / base) {
+            return NO;
+        }
+        result *= base;
+    }
+
+    *out = result;
+    return YES;
+}
+
+@protocol OutputSink <NSObject>
+- (BOOL)writeBytes:(const char *)bytes length:(NSUInteger)length;
+- (BOOL)writeChar:(char)c;
+- (void)close;
+@end
+
+@interface FileSink : NSObject <OutputSink>
+@property(nonatomic, assign) FILE *fp;
+- (instancetype)initWithPath:(NSString *)path;
+@end
+
+@implementation FileSink
+
+- (instancetype)initWithPath:(NSString *)path {
+    self = [super init];
+    if (!self) return nil;
+
+    const char *cpath = [path fileSystemRepresentation];
+    FILE *f = fopen(cpath, "w");
+    if (!f) return nil;
+
+    _fp = f;
+    return self;
+}
+
+- (BOOL)writeBytes:(const char *)bytes length:(NSUInteger)length {
+    if (!_fp || !bytes) return NO;
+    size_t wrote = fwrite(bytes, 1, (size_t)length, _fp);
+    return wrote == (size_t)length;
+}
+
+- (BOOL)writeChar:(char)c {
+    if (!_fp) return NO;
+    int rc = fputc((unsigned char)c, _fp);
+    return rc != EOF;
+}
+
+- (void)close {
+    if (_fp) {
+        fclose(_fp);
+        _fp = NULL;
+    }
+}
+
+- (void)dealloc {
+    [self close];
+}
+
+@end
+
+static BOOL generate_permutations(uint64_t n, id<OutputSink> sink) {
+    if (!sink) return NO;
+
+    uint64_t limit = 0;
+    if (!safe_uint64_power(64ULL, n, &limit)) {
+        return NO;
+    }
+
+    // Allocate buffer for the N-character token (no terminator needed).
+    char *buf = (char *)malloc((size_t)n);
+    if (!buf) return NO;
+
+    for (uint64_t i = 0; i < limit; i++) {
+        uint64_t v = i;
+        for (NSInteger pos = (NSInteger)n - 1; pos >= 0; pos--) {
+            uint64_t idx = v & 63ULL;
+            buf[pos] = ALPHABET[idx];
+            v >>= 6;
+        }
+
+        if (![sink writeBytes:buf length:(NSUInteger)n]) {
+            free(buf);
+            return NO;
+        }
+        if (![sink writeChar:'\n']) {
+            free(buf);
+            return NO;
+        }
+    }
+
+    free(buf);
+    return YES;
+}
+
+int main(int argc, const char * argv[]) {
+    @autoreleasepool {
+        uint64_t n = 4;
+        NSString *outPath = @"system_safe.txt";
+
+        if (argc >= 2) {
+            char *endp = NULL;
+            unsigned long long parsed = strtoull(argv[1], &endp, 10);
+            if (endp && *endp == '\0') {
+                n = (uint64_t)parsed;
+            } else {
+                fprintf(stderr, "Invalid N: %s\n", argv[1]);
+                return 2;
+            }
+        }
+
+        if (argc >= 3) {
+            outPath = [NSString stringWithUTF8String:argv[2]];
+        }
+
+        FileSink *sink = [[FileSink alloc] initWithPath:outPath];
+        if (!sink) {
+            perror("Error opening file");
+            return 1;
+        }
+
+        BOOL ok = generate_permutations(n, sink);
+        [sink close];
+
+        return ok ? 0 : 1;
+    }
+}

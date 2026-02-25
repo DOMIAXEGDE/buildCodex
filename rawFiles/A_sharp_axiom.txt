@@ -1,0 +1,198 @@
+// A# (Axiom) Monolithic Script (C#-compatible .NET single-file)
+// ------------------------------------------------------------
+// Behavior matches the attached program:
+// - ALPHABET: 64 chars: a-z A-Z 0-9 space newline
+// - safe_uint64_power(64, n, &outTotal) with overflow detection
+// - generate_permutations(n, sink): for i in [0, 64^n):
+//     build n bytes by repeated: digit = tmp & 63; tmp >>= 6
+//     store into buffer from right-to-left (pos = n-1..0)
+//     sink.write(buffer, n); sink.write_char('\n')
+// - main: n=4, output file "system_safe.txt"
+//
+// Notes:
+// - This intentionally writes LF '\n' (byte 10) as in the assembly, not CRLF.
+// - Because ALPHABET includes '\n', some generated “strings” contain newlines inside them
+//   exactly like the original program, producing additional line breaks in the output.
+
+using System;
+using System.IO;
+using System.Text;
+
+public static class AxiomProgram
+{
+    // 64-character alphabet (matches the assembly exactly):
+    // "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+    private static readonly byte[] ALPHABET = Encoding.ASCII.GetBytes(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+    );
+
+    // OutputSink equivalent: ctx + function pointers (modeled as virtual methods here).
+    private abstract class OutputSink : IDisposable
+    {
+        public abstract bool Write(ReadOnlySpan<byte> data);
+        public abstract bool WriteChar(byte c);
+        public abstract void Dispose();
+    }
+
+    // File-backed sink (fopen/fwrite/fputc/fclose analog).
+    private sealed class FileSink : OutputSink
+    {
+        private FileStream? _fs;
+
+        public static bool Init(out FileSink sink, string path)
+        {
+            sink = new FileSink();
+            try
+            {
+                // "w" mode equivalent (truncate/create).
+                sink._fs = new FileStream(
+                    path,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.Read,
+                    bufferSize: 1 << 20, // 1 MiB buffer for throughput
+                    useAsync: false
+                );
+                return true;
+            }
+            catch
+            {
+                sink.Dispose();
+                return false;
+            }
+        }
+
+        public override bool Write(ReadOnlySpan<byte> data)
+        {
+            try
+            {
+                if (_fs is null) return false;
+                _fs.Write(data);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public override bool WriteChar(byte c)
+        {
+            try
+            {
+                if (_fs is null) return false;
+                _fs.WriteByte(c);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public override void Dispose()
+        {
+            try { _fs?.Dispose(); } catch { /* swallow */ }
+            _fs = null;
+        }
+    }
+
+    // safe_uint64_power(unsigned long base, unsigned long exp, unsigned long* out)
+    // Returns: true on success, false on overflow (matches assembly: eax=1 success, eax=0 fail).
+    private static bool SafeUInt64Power(ulong @base, ulong exp, out ulong result)
+    {
+        result = 1UL;
+
+        // exp loop like the assembly (i from 0 while i<exp).
+        for (ulong i = 0; i < exp; i++)
+        {
+            // Detect overflow for result *= base
+            // (unsigned multiply overflow check).
+            if (@base != 0 && result > (ulong.MaxValue / @base))
+                return false;
+
+            result *= @base;
+        }
+
+        return true;
+    }
+
+    // generate_permutations(unsigned long n, OutputSink* sink)
+    // Returns: true on success, false if sink write fails or overflow in power.
+    private static bool GeneratePermutations(ulong n, OutputSink sink)
+    {
+        // total = 64^n (safe)
+        if (!SafeUInt64Power(64UL, n, out ulong total))
+            return false;
+
+        // Buffer corresponds to the stack buffer used in the assembly.
+        // We write exactly n bytes to sink, then a '\n' char via WriteChar(10).
+        // Use a fixed byte[] for speed; fill per iteration.
+        if (n > int.MaxValue) return false; // sanity (won't happen here)
+        int len = (int)n;
+        byte[] buf = new byte[len];
+
+        for (ulong i = 0; i < total; i++)
+        {
+            ulong tmp = i;
+            long pos = len - 1; // assembly: starts at n-1 and decrements to 0
+
+            while (pos >= 0)
+            {
+                // digit = tmp & 63
+                int digit = (int)(tmp & 63UL);
+                buf[pos] = ALPHABET[digit];
+
+                // tmp >>= 6
+                tmp >>= 6;
+
+                pos--;
+            }
+
+            // sink.write(ctx, buf, n)
+            if (!sink.Write(buf))
+                return false;
+
+            // sink.write_char(ctx, 10)
+            if (!sink.WriteChar((byte)10))
+                return false;
+        }
+
+        return true;
+    }
+
+    // main (matches the assembly’s behavior):
+    // - output path: "system_safe.txt"
+    // - n = 4
+    public static int Main(string[] args)
+    {
+        const string defaultPath = "system_safe.txt";
+        const ulong defaultN = 4;
+
+        // Allow optional overrides (still monolithic; defaults match original):
+        // args[0] = output path, args[1] = n
+        string path = (args.Length >= 1 && !string.IsNullOrWhiteSpace(args[0])) ? args[0] : defaultPath;
+        ulong n = defaultN;
+
+        if (args.Length >= 2 && ulong.TryParse(args[1], out ulong parsed))
+            n = parsed;
+
+        if (!FileSink.Init(out FileSink sink, path))
+        {
+            Console.Error.WriteLine("Error opening file");
+            return 1;
+        }
+
+        bool ok;
+        try
+        {
+            ok = GeneratePermutations(n, sink);
+        }
+        finally
+        {
+            sink.Dispose();
+        }
+
+        return ok ? 0 : 1;
+    }
+}

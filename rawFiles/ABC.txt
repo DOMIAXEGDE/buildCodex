@@ -1,0 +1,174 @@
+# ======================================================================
+# Monolithic ABC Script (single file)
+# - Reconstructs behavior of assembly.txt program
+# - Writes all 64^N permutations (N=4 in MAIN) to "system_safe.txt"
+# ======================================================================
+
+ABC_VERSION 1
+
+# --- Constants ---------------------------------------------------------
+
+CONST U64_MAX : u64 = 18446744073709551615
+
+# 64-character alphabet (6-bit digits):
+# 0..25  a-z
+# 26..51 A-Z
+# 52..61 0-9
+# 62     space
+# 63     newline
+CONST ALPHABET : str =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n"
+
+CONST OUT_PATH : str = "system_safe.txt"
+CONST OPEN_MODE : str = "w"
+CONST ERR_OPEN  : str = "Error opening file"
+
+# --- Foreign / host-provided I/O --------------------------------------
+# (ABC assumes these are provided by the runtime/host)
+
+EXTERN FUNC fopen(path: str, mode: str) -> ptr
+EXTERN FUNC fwrite(data: ptr, size: u64, count: u64, file: ptr) -> u64
+EXTERN FUNC fputc(ch: i32, file: ptr) -> i32
+EXTERN FUNC fclose(file: ptr) -> i32
+EXTERN FUNC perror(msg: str) -> void
+
+# --- Types -------------------------------------------------------------
+
+TYPE WriteFn     = FUNC(ctx: ptr, data: ptr, n: u64) -> bool
+TYPE WriteCharFn = FUNC(ctx: ptr, ch: u8) -> bool
+
+STRUCT OutputSink {
+  ctx       : ptr
+  write     : WriteFn
+  writeChar : WriteCharFn
+}
+
+# --- Helpers -----------------------------------------------------------
+
+FUNC u64_mul_overflow(a: u64, b: u64, out: *u64) -> bool {
+  # returns true if overflow would occur, else writes product and returns false
+  IF a == 0 OR b == 0 {
+    *out = 0
+    RETURN false
+  }
+  IF a > (U64_MAX / b) {
+    RETURN true
+  }
+  *out = a * b
+  RETURN false
+}
+
+# safe_uint64_power(base, exp, outPtr) -> bool
+# assembly semantics: initialize *out=1; loop exp times; if overflow -> return 0; else return 1
+FUNC safe_uint64_power(base: u64, exp: u64, outPtr: *u64) -> bool {
+  *outPtr = 1
+  VAR i : u64 = 0
+
+  WHILE i < exp {
+    VAR prod : u64 = 0
+    VAR ovf  : bool = u64_mul_overflow(*outPtr, base, &prod)
+    IF ovf {
+      RETURN false
+    }
+    *outPtr = prod
+    i = i + 1
+  }
+
+  RETURN true
+}
+
+# --- File sink implementation -----------------------------------------
+
+FUNC file_sink_write(ctx: ptr, data: ptr, n: u64) -> bool {
+  # fwrite(data, 1, n, file) must equal n
+  VAR wrote : u64 = fwrite(data, 1, n, ctx)
+  RETURN (wrote == n)
+}
+
+FUNC file_sink_write_char(ctx: ptr, ch: u8) -> bool {
+  VAR r : i32 = fputc((i32)ch, ctx)
+  RETURN (r != -1)
+}
+
+FUNC file_sink_init(sink: *OutputSink, path: str) -> bool {
+  VAR f : ptr = fopen(path, OPEN_MODE)
+  IF f == 0 {
+    RETURN false
+  }
+
+  sink->ctx       = f
+  sink->write     = file_sink_write
+  sink->writeChar = file_sink_write_char
+  RETURN true
+}
+
+FUNC file_sink_close(sink: *OutputSink) -> void {
+  IF sink == 0 { RETURN }
+  IF sink->ctx == 0 { RETURN }
+
+  fclose(sink->ctx)
+  sink->ctx = 0
+}
+
+# --- Core logic --------------------------------------------------------
+
+# generate_permutations(n, sink) -> bool
+# Enumerates i from 0..(64^n - 1)
+# For each i: fill buffer[n] from right-to-left using 6-bit digits and ALPHABET
+# Then: sink.write(buffer,n); sink.writeChar('\n')
+FUNC generate_permutations(n: u64, sink: *OutputSink) -> bool {
+  VAR total : u64 = 0
+  VAR okPow : bool = safe_uint64_power(64, n, &total)
+  IF NOT okPow {
+    RETURN false
+  }
+
+  VAR i : u64 = 0
+  WHILE i < total {
+    VAR x   : u64 = i
+    VAR idx : i64 = (i64)n - 1
+
+    # buffer sized to n bytes (no terminator needed; we write raw bytes)
+    VAR buf : BYTES[n]
+
+    WHILE idx >= 0 {
+      VAR digit : u64 = (x & 63)                 # 6-bit chunk
+      VAR ch    : u8  = (u8)ALPHABET[digit]      # lookup in 64-char alphabet
+      buf[(u64)idx] = ch
+      x = x >> 6
+      idx = idx - 1
+    }
+
+    VAR okWrite : bool = sink->write(sink->ctx, &buf[0], n)
+    IF NOT okWrite { RETURN false }
+
+    VAR okNL : bool = sink->writeChar(sink->ctx, 10)  # '\n'
+    IF NOT okNL { RETURN false }
+
+    i = i + 1
+  }
+
+  RETURN true
+}
+
+# --- Program entry -----------------------------------------------------
+
+FUNC MAIN() -> i32 {
+  VAR sink : OutputSink
+
+  VAR okInit : bool = file_sink_init(&sink, OUT_PATH)
+  IF NOT okInit {
+    perror(ERR_OPEN)
+    RETURN 1
+  }
+
+  VAR okGen : bool = generate_permutations(4, &sink)
+
+  file_sink_close(&sink)
+
+  IF NOT okGen {
+    RETURN 1
+  }
+
+  RETURN 0
+}

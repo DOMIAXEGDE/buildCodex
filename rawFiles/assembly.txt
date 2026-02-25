@@ -1,0 +1,249 @@
+ALPHABET:
+        .ascii  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567"
+        .ascii  "89 \n"
+safe_uint64_power(unsigned long, unsigned long, unsigned long*):
+        push    rbp
+        mov     rbp, rsp
+        mov     QWORD PTR [rbp-24], rdi
+        mov     QWORD PTR [rbp-32], rsi
+        mov     QWORD PTR [rbp-40], rdx
+        mov     rax, QWORD PTR [rbp-40]
+        mov     QWORD PTR [rax], 1
+        mov     QWORD PTR [rbp-8], 0
+        jmp     .L2
+.L7:
+        mov     rax, QWORD PTR [rbp-40]
+        mov     rdx, QWORD PTR [rax]
+        mov     ecx, 0
+        mov     rax, rdx
+        mul     QWORD PTR [rbp-24]
+        jno     .L3
+        mov     ecx, 1
+.L3:
+        mov     rax, rcx
+        test    rax, rax
+        je      .L5
+        mov     eax, 0
+        jmp     .L6
+.L5:
+        mov     rax, QWORD PTR [rbp-40]
+        mov     rax, QWORD PTR [rax]
+        imul    rax, QWORD PTR [rbp-24]
+        mov     rdx, rax
+        mov     rax, QWORD PTR [rbp-40]
+        mov     QWORD PTR [rax], rdx
+        add     QWORD PTR [rbp-8], 1
+.L2:
+        mov     rax, QWORD PTR [rbp-8]
+        cmp     rax, QWORD PTR [rbp-32]
+        jb      .L7
+        mov     eax, 1
+.L6:
+        pop     rbp
+        ret
+generate_permutations(unsigned long, OutputSink*):
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 80
+        mov     QWORD PTR [rbp-72], rdi
+        mov     QWORD PTR [rbp-80], rsi
+        lea     rdx, [rbp-40]
+        mov     rax, QWORD PTR [rbp-72]
+        mov     rsi, rax
+        mov     edi, 64
+        call    safe_uint64_power(unsigned long, unsigned long, unsigned long*)
+        xor     eax, 1
+        test    al, al
+        je      .L9
+        mov     eax, 0
+        jmp     .L17
+.L9:
+        mov     QWORD PTR [rbp-8], 0
+        jmp     .L11
+.L16:
+        mov     rax, QWORD PTR [rbp-8]
+        mov     QWORD PTR [rbp-16], rax
+        mov     rax, QWORD PTR [rbp-72]
+        sub     rax, 1
+        mov     QWORD PTR [rbp-24], rax
+        jmp     .L12
+.L13:
+        mov     rax, QWORD PTR [rbp-16]
+        and     eax, 63
+        mov     QWORD PTR [rbp-32], rax
+        mov     rax, QWORD PTR [rbp-32]
+        add     rax, OFFSET FLAT:ALPHABET
+        movzx   eax, BYTE PTR [rax]
+        lea     rcx, [rbp-50]
+        mov     rdx, QWORD PTR [rbp-24]
+        add     rdx, rcx
+        mov     BYTE PTR [rdx], al
+        shr     QWORD PTR [rbp-16], 6
+        sub     QWORD PTR [rbp-24], 1
+.L12:
+        cmp     QWORD PTR [rbp-24], 0
+        jns     .L13
+        mov     rax, QWORD PTR [rbp-80]
+        mov     r8, QWORD PTR [rax+8]
+        mov     rax, QWORD PTR [rbp-80]
+        mov     rax, QWORD PTR [rax]
+        mov     rdx, QWORD PTR [rbp-72]
+        lea     rcx, [rbp-50]
+        mov     rsi, rcx
+        mov     rdi, rax
+        call    r8
+        xor     eax, 1
+        test    al, al
+        je      .L14
+        mov     eax, 0
+        jmp     .L17
+.L14:
+        mov     rax, QWORD PTR [rbp-80]
+        mov     rdx, QWORD PTR [rax+16]
+        mov     rax, QWORD PTR [rbp-80]
+        mov     rax, QWORD PTR [rax]
+        mov     esi, 10
+        mov     rdi, rax
+        call    rdx
+        xor     eax, 1
+        test    al, al
+        je      .L15
+        mov     eax, 0
+        jmp     .L17
+.L15:
+        add     QWORD PTR [rbp-8], 1
+.L11:
+        mov     rax, QWORD PTR [rbp-40]
+        cmp     QWORD PTR [rbp-8], rax
+        jb      .L16
+        mov     eax, 1
+.L17:
+        leave
+        ret
+file_sink_write(void*, char const*, unsigned long):
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 48
+        mov     QWORD PTR [rbp-24], rdi
+        mov     QWORD PTR [rbp-32], rsi
+        mov     QWORD PTR [rbp-40], rdx
+        mov     rax, QWORD PTR [rbp-24]
+        mov     QWORD PTR [rbp-8], rax
+        mov     rcx, QWORD PTR [rbp-8]
+        mov     rdx, QWORD PTR [rbp-40]
+        mov     rax, QWORD PTR [rbp-32]
+        mov     esi, 1
+        mov     rdi, rax
+        call    fwrite
+        cmp     QWORD PTR [rbp-40], rax
+        sete    al
+        leave
+        ret
+file_sink_write_char(void*, char):
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 32
+        mov     QWORD PTR [rbp-24], rdi
+        mov     eax, esi
+        mov     BYTE PTR [rbp-28], al
+        mov     rax, QWORD PTR [rbp-24]
+        mov     QWORD PTR [rbp-8], rax
+        movsx   eax, BYTE PTR [rbp-28]
+        mov     rdx, QWORD PTR [rbp-8]
+        mov     rsi, rdx
+        mov     edi, eax
+        call    fputc
+        cmp     eax, -1
+        setne   al
+        leave
+        ret
+.LC0:
+        .string "w"
+file_sink_init(OutputSink*, char const*):
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 32
+        mov     QWORD PTR [rbp-24], rdi
+        mov     QWORD PTR [rbp-32], rsi
+        mov     rax, QWORD PTR [rbp-32]
+        mov     esi, OFFSET FLAT:.LC0
+        mov     rdi, rax
+        call    fopen
+        mov     QWORD PTR [rbp-8], rax
+        cmp     QWORD PTR [rbp-8], 0
+        jne     .L23
+        mov     eax, 0
+        jmp     .L24
+.L23:
+        mov     rax, QWORD PTR [rbp-24]
+        mov     rdx, QWORD PTR [rbp-8]
+        mov     QWORD PTR [rax], rdx
+        mov     rax, QWORD PTR [rbp-24]
+        mov     QWORD PTR [rax+8], OFFSET FLAT:file_sink_write(void*, char const*, unsigned long)
+        mov     rax, QWORD PTR [rbp-24]
+        mov     QWORD PTR [rax+16], OFFSET FLAT:file_sink_write_char(void*, char)
+        mov     eax, 1
+.L24:
+        leave
+        ret
+file_sink_close(OutputSink*):
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 16
+        mov     QWORD PTR [rbp-8], rdi
+        cmp     QWORD PTR [rbp-8], 0
+        je      .L27
+        mov     rax, QWORD PTR [rbp-8]
+        mov     rax, QWORD PTR [rax]
+        test    rax, rax
+        je      .L27
+        mov     rax, QWORD PTR [rbp-8]
+        mov     rax, QWORD PTR [rax]
+        mov     rdi, rax
+        call    fclose
+        mov     rax, QWORD PTR [rbp-8]
+        mov     QWORD PTR [rax], 0
+.L27:
+        nop
+        leave
+        ret
+.LC1:
+        .string "system_safe.txt"
+.LC2:
+        .string "Error opening file"
+main:
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 48
+        mov     QWORD PTR [rbp-8], 4
+        lea     rax, [rbp-48]
+        mov     esi, OFFSET FLAT:.LC1
+        mov     rdi, rax
+        call    file_sink_init(OutputSink*, char const*)
+        xor     eax, 1
+        test    al, al
+        je      .L29
+        mov     edi, OFFSET FLAT:.LC2
+        call    perror
+        mov     eax, 1
+        jmp     .L32
+.L29:
+        lea     rax, [rbp-48]
+        mov     rsi, rax
+        mov     edi, 4
+        call    generate_permutations(unsigned long, OutputSink*)
+        mov     BYTE PTR [rbp-9], al
+        lea     rax, [rbp-48]
+        mov     rdi, rax
+        call    file_sink_close(OutputSink*)
+        movzx   eax, BYTE PTR [rbp-9]
+        xor     eax, 1
+        test    al, al
+        je      .L31
+        mov     eax, 1
+        jmp     .L32
+.L31:
+        mov     eax, 0
+.L32:
+        leave
+        ret
